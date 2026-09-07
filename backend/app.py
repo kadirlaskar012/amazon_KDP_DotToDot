@@ -8,7 +8,10 @@ and high-res PNG export.
 
 import os
 import io
+import re
+import json
 import base64
+from datetime import datetime
 from typing import List, Optional, Dict, Any
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +24,10 @@ from .dot_generator import generate_dots_from_analysis, optimize_number_position
 from .validator import validate_puzzle
 from .pdf_generator import generate_vector_pdf, generate_raster_png, generate_book_pdf
 from .samples import SAMPLES_DIR, create_all_samples
+
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PROJECTS_DIR = os.path.join(BASE_DIR, "projects")
+os.makedirs(PROJECTS_DIR, exist_ok=True)
 
 
 app = FastAPI(title="Hybrid Dot-to-Dot Generator & Editor API")
@@ -350,4 +357,153 @@ def export_book_pdf(req: ExportBookPdfRequest):
         media_type="application/pdf",
         headers={"Content-Disposition": "attachment; filename=dot_to_dot_book.pdf"}
     )
+
+
+# --- Project Management Endpoints (Local-Only Disk Storage) ---
+
+class SaveProjectRequest(BaseModel):
+    project: Dict[str, Any]
+    saveLocation: Optional[str] = None
+    filename: Optional[str] = None
+
+
+class LoadProjectRequest(BaseModel):
+    filePath: str
+
+
+@app.get("/api/projects/default-location")
+def get_default_location():
+    """Returns the default tools projects directory path on disk."""
+    os.makedirs(PROJECTS_DIR, exist_ok=True)
+    return {
+        "defaultLocation": PROJECTS_DIR,
+        "folderName": "projects"
+    }
+
+
+@app.get("/api/projects")
+def list_projects(folder: Optional[str] = None):
+    """
+    Lists all saved .dotproj project files in the tools projects folder or custom location.
+    """
+    target_dir = folder.strip() if (folder and folder.strip()) else PROJECTS_DIR
+    if not os.path.exists(target_dir):
+        return {"projects": [], "location": target_dir}
+
+    projects = []
+    for fname in os.listdir(target_dir):
+        if fname.endswith((".dotproj", ".json")):
+            fpath = os.path.join(target_dir, fname)
+            if not os.path.isfile(fpath):
+                continue
+            try:
+                stat = os.stat(fpath)
+                mtime_str = datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+                meta = {
+                    "filename": fname,
+                    "filePath": fpath,
+                    "updatedAt": mtime_str,
+                    "timestamp": stat.st_mtime,
+                    "sizeBytes": stat.st_size,
+                    "projectName": fname.replace(".dotproj", "").replace(".json", ""),
+                    "pageCount": 1,
+                    "dotsCount": 0
+                }
+                try:
+                    with open(fpath, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                        if "projectName" in data and data["projectName"]:
+                            meta["projectName"] = data["projectName"]
+                        if "pages" in data and isinstance(data["pages"], list):
+                            meta["pageCount"] = len(data["pages"])
+                        if "dots" in data and isinstance(data["dots"], list):
+                            meta["dotsCount"] = len(data["dots"])
+                except Exception:
+                    pass
+                projects.append(meta)
+            except Exception:
+                continue
+
+    projects.sort(key=lambda x: x.get("timestamp", 0), reverse=True)
+    return {"projects": projects, "location": target_dir}
+
+
+@app.post("/api/projects/save")
+def save_project_endpoint(req: SaveProjectRequest):
+    """
+    Saves the project data directly to the local disk in the tools projects folder
+    (or custom user location) without triggering any browser downloads.
+    """
+    target_dir = PROJECTS_DIR
+    proj_name = req.project.get("projectName", "untitled_puzzle")
+    safe_name = re.sub(r'[^a-zA-Z0-9_\-]', '_', proj_name).lower()
+    default_filename = f"{safe_name}.dotproj"
+
+    if req.saveLocation and req.saveLocation.strip():
+        loc = req.saveLocation.strip()
+        # If user passed a file path with extension
+        if loc.endswith((".dotproj", ".json")):
+            file_path = loc
+            target_dir = os.path.dirname(file_path) or PROJECTS_DIR
+            if target_dir:
+                os.makedirs(target_dir, exist_ok=True)
+            filename = os.path.basename(file_path)
+        else:
+            target_dir = loc
+            os.makedirs(target_dir, exist_ok=True)
+            filename = req.filename.strip() if req.filename and req.filename.strip() else default_filename
+            file_path = os.path.join(target_dir, filename)
+    else:
+        os.makedirs(PROJECTS_DIR, exist_ok=True)
+        filename = req.filename.strip() if req.filename and req.filename.strip() else default_filename
+        file_path = os.path.join(PROJECTS_DIR, filename)
+
+    try:
+        with open(file_path, "w", encoding="utf-8") as f:
+            json.dump(req.project, f, indent=2)
+        
+        pages_count = len(req.project.get("pages", []))
+        return {
+            "success": True,
+            "filePath": file_path,
+            "filename": filename,
+            "saveLocation": target_dir,
+            "pageCount": pages_count,
+            "message": f"Project successfully saved to {file_path}"
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to save project file: {str(e)}")
+
+
+@app.post("/api/projects/load")
+def load_project_endpoint(req: LoadProjectRequest):
+    """
+    Loads a saved project directly from a local file path on disk.
+    """
+    if not os.path.exists(req.filePath):
+        raise HTTPException(status_code=404, detail=f"Project file '{req.filePath}' not found")
+    try:
+        with open(req.filePath, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return {
+            "success": True,
+            "project": data,
+            "filePath": req.filePath
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read project file: {str(e)}")
+
+
+@app.delete("/api/projects/{filename}")
+def delete_project_endpoint(filename: str, folder: Optional[str] = None):
+    """Deletes a project file from disk."""
+    target_dir = folder.strip() if (folder and folder.strip()) else PROJECTS_DIR
+    target_path = os.path.join(target_dir, filename)
+    if not os.path.exists(target_path):
+        raise HTTPException(status_code=404, detail=f"File '{filename}' not found")
+    try:
+        os.remove(target_path)
+        return {"success": True, "deleted": filename}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to delete file: {str(e)}")
 

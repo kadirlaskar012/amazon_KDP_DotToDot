@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
-import { X, BookPlus, Check } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { X, BookPlus, Check, Folder } from 'lucide-react';
 import { PAGE_PRESETS } from '../types';
 import type { PagePreset, PageSetup } from '../types';
+import { getDefaultProjectLocation } from '../utils/projectIO';
 
 interface NewProjectModalProps {
   isOpen: boolean;
@@ -10,7 +11,8 @@ interface NewProjectModalProps {
     projectName: string,
     pageSetup: PageSetup,
     pageCount: number,
-    populateSamples: boolean
+    populateSamples: boolean,
+    saveLocation?: string
   ) => void;
 }
 
@@ -25,6 +27,18 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
   const [selectedPreset, setSelectedPreset] = useState<PagePreset>('letter');
   const [pageCount, setPageCount] = useState<number>(10);
   const [populateSamples, setPopulateSamples] = useState(true);
+  const [customSaveLocation, setCustomSaveLocation] = useState('');
+  const [defaultLocationPath, setDefaultLocationPath] = useState('projects/');
+
+  useEffect(() => {
+    if (isOpen) {
+      getDefaultProjectLocation()
+        .then((data) => {
+          if (data.defaultLocation) setDefaultLocationPath(data.defaultLocation);
+        })
+        .catch(() => {});
+    }
+  }, [isOpen]);
 
   if (!isOpen) return null;
 
@@ -32,7 +46,13 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
     e.preventDefault();
     const count = Math.max(1, Math.min(200, pageCount || 10));
     const setup = PAGE_PRESETS[selectedPreset] || PAGE_PRESETS.letter;
-    onCreateProject(name.trim() || 'Untitled Book Project', setup, count, populateSamples);
+    onCreateProject(
+      name.trim() || 'Untitled Book Project',
+      setup,
+      count,
+      populateSamples,
+      customSaveLocation.trim() || undefined
+    );
     onClose();
   };
 
@@ -68,6 +88,45 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({
                 required
               />
               <span className="form-hint">Used for PDF export metadata and file naming.</span>
+            </div>
+
+            {/* Project Save Location */}
+            <div className="form-group">
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <label className="form-label" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Folder size={14} color="#38bdf8" />
+                  <span>Project Save Location</span>
+                </label>
+                {customSaveLocation && (
+                  <button
+                    type="button"
+                    onClick={() => setCustomSaveLocation('')}
+                    style={{
+                      background: 'transparent',
+                      border: 'none',
+                      color: '#38bdf8',
+                      fontSize: 11,
+                      cursor: 'pointer',
+                      textDecoration: 'underline',
+                    }}
+                  >
+                    Reset to Default Folder
+                  </button>
+                )}
+              </div>
+              <input
+                type="text"
+                className="input-text"
+                value={customSaveLocation}
+                onChange={(e) => setCustomSaveLocation(e.target.value)}
+                placeholder={defaultLocationPath || 'Default: projects/ folder'}
+                style={{ fontFamily: 'monospace', fontSize: 12 }}
+              />
+              <span className="form-hint">
+                {customSaveLocation.trim()
+                  ? `Project will be saved to custom path: ${customSaveLocation.trim()}`
+                  : `Auto-saves directly to "${defaultLocationPath || 'projects/'}" folder on your computer. No browser download.`}
+              </span>
             </div>
 
             {/* Page Trim Size */}

@@ -21,7 +21,9 @@ import { SamplePickerModal } from './components/SamplePickerModal';
 import { NewProjectModal } from './components/NewProjectModal';
 import { PageTimeline } from './components/PageTimeline';
 import { MediaLibraryModal } from './components/MediaLibraryModal';
-import { exportProjectToFile, importProjectFromFile } from './utils/projectIO';
+import { OpenProjectModal } from './components/OpenProjectModal';
+import { importProjectFromFile, saveProjectToDisk, loadProjectFromDisk } from './utils/projectIO';
+import { saveWorkspaceDraft, getWorkspaceDraft } from './utils/workspaceStorage';
 
 const API_BASE = 'http://127.0.0.1:8000';
 const MAX_DOTS_HARD_CAP = 120;
@@ -92,7 +94,10 @@ export const App: React.FC = () => {
 
   // Media Library State
   const [mediaLibrary, setMediaLibrary] = useState<MediaItem[]>([]);
+  const [saveLocation, setSaveLocation] = useState<string>('');
+  const [currentProjectFilePath, setCurrentProjectFilePath] = useState<string | null>(null);
   const [isNewProjectModalOpen, setIsNewProjectModalOpen] = useState(false);
+  const [isOpenProjectModalOpen, setIsOpenProjectModalOpen] = useState(false);
   const [isMediaLibraryModalOpen, setIsMediaLibraryModalOpen] = useState(false);
   const [isBatchPlotting, setIsBatchPlotting] = useState(false);
   const [batchPlotProgress, setBatchPlotProgress] = useState<{ current: number; total: number } | null>(null);
@@ -136,6 +141,7 @@ export const App: React.FC = () => {
   const [history, setHistory] = useState<Dot[][]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const isUndoRedoAction = useRef(false);
+  const isDraftRestored = useRef(false);
 
   const pushHistory = useCallback((newDots: Dot[]) => {
     if (isUndoRedoAction.current) {
@@ -270,19 +276,139 @@ export const App: React.FC = () => {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [handleUndo, handleRedo, dots.length]);
 
-  // Load initial samples and generate default dinosaur puzzle
+  // Restore active workspace session from IndexedDB draft on page load/refresh
   useEffect(() => {
-    fetch(`${API_BASE}/api/samples`)
-      .then((res) => res.json())
-      .then((data: SampleItem[]) => {
-        setSamples(data);
-        // Trigger initial trace on dinosaur
-        loadSampleAndGenerate('dinosaur');
-      })
-      .catch((err) => {
+    let isMounted = true;
+
+    const restoreOrInit = async () => {
+      try {
+        const draft = await getWorkspaceDraft();
+        if (draft && draft.pages && draft.pages.length > 0 && isMounted) {
+          isDraftRestored.current = true;
+          setProjectName(draft.projectName || 'Dinosaur Dot-to-Dot');
+          if (draft.pageSetup) setPageSetup(draft.pageSetup);
+          setPages(draft.pages);
+          const activeIdx = Math.min(draft.activePageIndex || 0, draft.pages.length - 1);
+          setActivePageIndex(activeIdx);
+          const activePg = draft.pages[activeIdx];
+          const activeDots = activePg?.dots || draft.dots || [];
+          setDots(activeDots);
+          setInitialAutoDots(activePg?.initialAutoDots || draft.initialAutoDots || []);
+          setReferenceImage(activePg?.referenceImage || draft.referenceImage || null);
+          setEditedIllustration(activePg?.editedIllustration || draft.editedIllustration || null);
+          setSelectedSampleId(activePg?.sampleId || null);
+          setPageCaption(activePg?.caption || draft.pageCaption || 'BABY DINOSAUR');
+          if (draft.dotRadius) setDotRadius(draft.dotRadius);
+          if (draft.fontSize) setFontSize(draft.fontSize);
+          if (draft.referenceOpacity !== undefined) setReferenceOpacity(draft.referenceOpacity);
+          if (draft.referenceVisible !== undefined) setReferenceVisible(draft.referenceVisible);
+          if (draft.referenceLocked !== undefined) setReferenceLocked(draft.referenceLocked);
+          if (draft.showAnswer !== undefined) setShowAnswer(draft.showAnswer);
+          if (draft.snapEnabled !== undefined) setSnapEnabled(draft.snapEnabled);
+          if (draft.safeMarginsVisible !== undefined) setSafeMarginsVisible(draft.safeMarginsVisible);
+          if (draft.mediaLibrary) setMediaLibrary(draft.mediaLibrary);
+          if (draft.saveLocation) setSaveLocation(draft.saveLocation);
+          if (draft.currentProjectFilePath) setCurrentProjectFilePath(draft.currentProjectFilePath);
+          setHistory([activeDots]);
+          setHistoryIndex(0);
+          showToast(`Restored previous workspace session.`);
+        }
+      } catch (err) {
+        console.warn('Could not restore workspace draft:', err);
+      }
+
+      // Fetch samples gallery
+      try {
+        const res = await fetch(`${API_BASE}/api/samples`);
+        const data: SampleItem[] = await res.json();
+        if (isMounted) setSamples(data);
+        // Only trigger default dinosaur generation if no saved session was restored
+        if (!isDraftRestored.current && isMounted) {
+          isDraftRestored.current = true;
+          loadSampleAndGenerate('dinosaur');
+        }
+      } catch (err) {
         console.warn('Backend not yet ready or offline:', err);
-      });
+      }
+    };
+
+    restoreOrInit();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
+
+  // Debounced auto-save workspace draft to IndexedDB (preserves work on refresh)
+  useEffect(() => {
+    if (!isDraftRestored.current) return;
+
+    const timeout = setTimeout(() => {
+      const pagesSnapshot = pages.map((p, idx) => {
+        if (idx === activePageIndex) {
+          return {
+            ...p,
+            dots,
+            initialAutoDots,
+            referenceImage,
+            editedIllustration,
+            caption: pageCaption,
+            sampleId: selectedSampleId,
+          };
+        }
+        return p;
+      });
+
+      saveWorkspaceDraft({
+        projectName,
+        pageSetup,
+        pages: pagesSnapshot,
+        activePageIndex,
+        dots,
+        initialAutoDots,
+        referenceImage,
+        editedIllustration,
+        pageCaption,
+        dotRadius,
+        fontSize,
+        referenceOpacity,
+        referenceVisible,
+        referenceLocked,
+        showAnswer,
+        snapEnabled,
+        safeMarginsVisible,
+        mediaLibrary,
+        saveLocation,
+        currentProjectFilePath,
+        timestamp: Date.now(),
+      });
+    }, 500);
+
+    return () => clearTimeout(timeout);
+  }, [
+    projectName,
+    pageSetup,
+    pages,
+    activePageIndex,
+    dots,
+    initialAutoDots,
+    referenceImage,
+    editedIllustration,
+    pageCaption,
+    dotRadius,
+    fontSize,
+    referenceOpacity,
+    referenceVisible,
+    referenceLocked,
+    showAnswer,
+    snapEnabled,
+    safeMarginsVisible,
+    mediaLibrary,
+    saveLocation,
+    currentProjectFilePath,
+    selectedSampleId,
+  ]);
+
 
   // Fetch / Generate from Sample
   const loadSampleAndGenerate = async (sampleId: string) => {
@@ -878,15 +1004,18 @@ export const App: React.FC = () => {
     showToast(`Deleted Page ${index + 1}.`);
   };
 
-  // Create New Project with specified N pages
-  const handleCreateProject = (
+  // Create New Project with specified N pages and auto-save location (No download prompt)
+  const handleCreateProject = async (
     name: string,
     setup: PageSetup,
     pageCount: number,
-    populateSamples: boolean
+    populateSamples: boolean,
+    location?: string
   ) => {
     setProjectName(name);
     setPageSetup(setup);
+    const chosenLoc = location?.trim() || '';
+    setSaveLocation(chosenLoc);
 
     const sampleIds = ['dinosaur', 'rocket', 'cat', 'teddy_bear', 'car', 'flower'];
     const sampleNames: Record<string, string> = {
@@ -926,25 +1055,52 @@ export const App: React.FC = () => {
     setHistory([[]]);
     setHistoryIndex(0);
 
+    let initialMedia: MediaItem[] = [];
     if (populateSamples && samples.length > 0) {
-      setMediaLibrary(
-        samples.map((s) => ({
-          id: `media-${s.id}`,
-          filename: s.filename,
-          dataUri: `${API_BASE}/api/samples/${s.filename}`,
-          width: 1200,
-          height: 1550,
-          dateAdded: Date.now(),
-        }))
-      );
+      initialMedia = samples.map((s) => ({
+        id: `media-${s.id}`,
+        filename: s.filename,
+        dataUri: `${API_BASE}/api/samples/${s.filename}`,
+        width: 1200,
+        height: 1550,
+        dateAdded: Date.now(),
+      }));
+      setMediaLibrary(initialMedia);
+    } else {
+      setMediaLibrary([]);
+    }
+
+    // Auto-save project immediately into tools projects/ directory (No file download!)
+    const initialProjectData: ProjectData = {
+      version: '2.0',
+      projectName: name,
+      pageSetup: setup,
+      dotRadius,
+      fontSize,
+      referenceOpacity,
+      referenceVisible,
+      referenceLocked,
+      showAnswer,
+      snapToGrid: snapEnabled,
+      pages: newPages,
+      activePageIndex: 0,
+      mediaLibrary: initialMedia,
+      saveLocation: chosenLoc || undefined,
+    };
+
+    try {
+      const saveRes = await saveProjectToDisk(initialProjectData, chosenLoc || undefined);
+      setCurrentProjectFilePath(saveRes.filePath);
+      showToast(`Project created & auto-saved to ${saveRes.filename}`);
+    } catch (err) {
+      console.error('Auto-save on creation error:', err);
+      showToast(`Project created with ${pageCount} pages.`);
     }
 
     // If first page has a sample, immediately load and trace it
     if (populateSamples && newPages[0].sampleId) {
       loadSampleAndGenerate(newPages[0].sampleId);
     }
-
-    showToast(`Created project "${name}" with ${pageCount} pages!`);
   };
 
   // Export Single Page Vector PDF
@@ -1095,8 +1251,8 @@ export const App: React.FC = () => {
     }
   };
 
-  // Project Save (.dotproj)
-  const handleSaveProject = () => {
+  // Project Save (Directly to disk in tools projects/ folder - No browser download!)
+  const handleSaveProject = async () => {
     const pagesSnapshot = pages.map((p, idx) => {
       if (idx === activePageIndex) {
         return {
@@ -1126,21 +1282,82 @@ export const App: React.FC = () => {
       pages: pagesSnapshot,
       activePageIndex,
       mediaLibrary,
+      saveLocation: saveLocation || undefined,
+      filePath: currentProjectFilePath || undefined,
       // Backwards compat
       dots,
       initialAutoDots,
       referenceImage,
       editedIllustration,
     };
-    exportProjectToFile(projectData, projectName);
-    showToast(`Saved project file (.dotproj) with ${pages.length} pages.`);
+
+    try {
+      const saved = await saveProjectToDisk(projectData, saveLocation || undefined);
+      setCurrentProjectFilePath(saved.filePath);
+      showToast(`Project saved to ${saved.filename} (${pages.length} pages)`);
+    } catch (err) {
+      console.error('Save failed:', err);
+      showToast(`Failed to save project: ${(err as Error).message}`);
+    }
   };
 
-  // Project Load (.dotproj)
-  const handleLoadProject = () => {
-    if (fileInputRef.current) {
-      fileInputRef.current.click();
+  const applyLoadedProject = useCallback((loaded: ProjectData) => {
+    setProjectName(loaded.projectName || 'Loaded Puzzle');
+    if (loaded.pageSetup) setPageSetup(loaded.pageSetup);
+    if (loaded.dotRadius) setDotRadius(loaded.dotRadius);
+    if (loaded.fontSize) setFontSize(loaded.fontSize);
+    if (loaded.referenceOpacity !== undefined) setReferenceOpacity(loaded.referenceOpacity);
+    if (loaded.referenceVisible !== undefined) setReferenceVisible(loaded.referenceVisible);
+    if (loaded.referenceLocked !== undefined) setReferenceLocked(loaded.referenceLocked);
+    if (loaded.showAnswer !== undefined) setShowAnswer(loaded.showAnswer);
+    if (loaded.snapToGrid !== undefined) setSnapEnabled(loaded.snapToGrid);
+
+    if (loaded.pages && loaded.pages.length > 0) {
+      setPages(loaded.pages);
+      const activeIdx = Math.min(loaded.activePageIndex || 0, loaded.pages.length - 1);
+      setActivePageIndex(activeIdx);
+      const activePg = loaded.pages[activeIdx];
+      setDots(activePg.dots || []);
+      setInitialAutoDots(activePg.initialAutoDots || activePg.dots || []);
+      setReferenceImage(activePg.referenceImage || null);
+      setEditedIllustration(activePg.editedIllustration || activePg.referenceImage || null);
+      setSelectedSampleId(activePg.sampleId || null);
+      setPageCaption(activePg.caption || activePg.title || 'Page 1');
+      setHistory([activePg.dots || []]);
+      setHistoryIndex(0);
+      runValidation(activePg.dots || []);
+    } else {
+      setDots(loaded.dots || []);
+      setInitialAutoDots(loaded.initialAutoDots || loaded.dots || []);
+      setReferenceImage(loaded.referenceImage || null);
+      setEditedIllustration(loaded.editedIllustration || loaded.referenceImage || null);
+      setHistory([loaded.dots || []]);
+      setHistoryIndex(0);
+      runValidation(loaded.dots || []);
     }
+
+    if (loaded.mediaLibrary) {
+      setMediaLibrary(loaded.mediaLibrary);
+    }
+  }, [runValidation]);
+
+  // Load project from local disk path
+  const handleLoadProjectFromDisk = async (filePath: string) => {
+    try {
+      const loaded = await loadProjectFromDisk(filePath);
+      applyLoadedProject(loaded);
+      setCurrentProjectFilePath(filePath);
+      if (loaded.saveLocation) setSaveLocation(loaded.saveLocation);
+      showToast(`Loaded "${loaded.projectName}" (${loaded.pages?.length || 1} pages) from projects/`);
+    } catch (err) {
+      console.error(err);
+      showToast(`Failed to load project: ${(err as Error).message}`);
+    }
+  };
+
+  // Open Project Modal (Local disk project browser)
+  const handleLoadProject = () => {
+    setIsOpenProjectModalOpen(true);
   };
 
   const handleProjectFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -1148,44 +1365,8 @@ export const App: React.FC = () => {
     if (!file) return;
     try {
       const loaded = await importProjectFromFile(file);
-      setProjectName(loaded.projectName || 'Loaded Puzzle');
-      if (loaded.pageSetup) setPageSetup(loaded.pageSetup);
-      if (loaded.dotRadius) setDotRadius(loaded.dotRadius);
-      if (loaded.fontSize) setFontSize(loaded.fontSize);
-      if (loaded.referenceOpacity !== undefined) setReferenceOpacity(loaded.referenceOpacity);
-      if (loaded.referenceVisible !== undefined) setReferenceVisible(loaded.referenceVisible);
-      if (loaded.referenceLocked !== undefined) setReferenceLocked(loaded.referenceLocked);
-      if (loaded.showAnswer !== undefined) setShowAnswer(loaded.showAnswer);
-      if (loaded.snapToGrid !== undefined) setSnapEnabled(loaded.snapToGrid);
-
-      if (loaded.pages && loaded.pages.length > 0) {
-        setPages(loaded.pages);
-        const activeIdx = Math.min(loaded.activePageIndex || 0, loaded.pages.length - 1);
-        setActivePageIndex(activeIdx);
-        const activePg = loaded.pages[activeIdx];
-        setDots(activePg.dots || []);
-        setInitialAutoDots(activePg.initialAutoDots || activePg.dots || []);
-        setReferenceImage(activePg.referenceImage || null);
-        setEditedIllustration(activePg.editedIllustration || activePg.referenceImage || null);
-        setSelectedSampleId(activePg.sampleId || null);
-        setHistory([activePg.dots || []]);
-        setHistoryIndex(0);
-        showToast(`Loaded book with ${loaded.pages.length} pages!`);
-        runValidation(activePg.dots || []);
-      } else {
-        setDots(loaded.dots || []);
-        setInitialAutoDots(loaded.initialAutoDots || loaded.dots || []);
-        setReferenceImage(loaded.referenceImage || null);
-        setEditedIllustration(loaded.editedIllustration || loaded.referenceImage || null);
-        setHistory([loaded.dots || []]);
-        setHistoryIndex(0);
-        showToast(`Loaded project!`);
-        runValidation(loaded.dots || []);
-      }
-
-      if (loaded.mediaLibrary) {
-        setMediaLibrary(loaded.mediaLibrary);
-      }
+      applyLoadedProject(loaded);
+      showToast(`Imported project from ${file.name}!`);
     } catch (err) {
       console.error(err);
       showToast('Error importing .dotproj file.');
@@ -1402,6 +1583,16 @@ export const App: React.FC = () => {
         isOpen={isNewProjectModalOpen}
         onClose={() => setIsNewProjectModalOpen(false)}
         onCreateProject={handleCreateProject}
+      />
+
+      {/* Open Project Modal (Browse & Open from tools projects/ folder) */}
+      <OpenProjectModal
+        isOpen={isOpenProjectModalOpen}
+        onClose={() => setIsOpenProjectModalOpen(false)}
+        onLoadProjectFromFilePath={handleLoadProjectFromDisk}
+        onBrowseFileFromDisk={() => {
+          if (fileInputRef.current) fileInputRef.current.click();
+        }}
       />
 
       {/* Media Library Modal */}

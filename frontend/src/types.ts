@@ -123,6 +123,9 @@ export interface ProjectData {
   activePageIndex: number;
   // Media library
   mediaLibrary: MediaItem[];
+  // Save location metadata
+  saveLocation?: string;
+  filePath?: string;
   // Backwards compatibility legacy fields
   referenceImage?: string | null;
   editedIllustration?: string | null;
