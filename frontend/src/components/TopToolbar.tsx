@@ -96,6 +96,9 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
           <span className="logo-text">Dot2Dot<span className="pro-badge">PRO</span></span>
         </div>
         <input
+          id="project-name-input"
+          name="projectName"
+          aria-label="Project Name"
           type="text"
           className="project-name-input"
           value={projectName}
@@ -113,9 +116,9 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         )}
       </div>
 
-      {/* 2. CENTER ZONE: Flexible, Scrollable Tools Bar */}
+      {/* 2. CENTER ZONE: Document & Editing Controls */}
       <div className="top-toolbar-center">
-        {/* Project & Media Operations */}
+        {/* Project & File Actions */}
         <div className="toolbar-section">
           <button
             className="btn btn-primary-soft btn-sm"
@@ -145,6 +148,9 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             <Upload size={15} />
             <span className="btn-label btn-label-secondary">Upload</span>
             <input
+              id="toolbar-image-upload-input"
+              name="imageUpload"
+              aria-label="Upload Line Art Image"
               type="file"
               accept="image/png, image/jpeg, image/jpg"
               onChange={(e) => {
@@ -194,8 +200,8 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 
         <div className="toolbar-divider" />
 
-        {/* Zoom Controls */}
-        <div className="toolbar-section zoom-controls">
+        {/* Zoom & Viewport */}
+        <div className="toolbar-section">
           <button
             className="btn btn-icon btn-sm"
             onClick={() => onZoomChange(Math.max(25, zoom - 25))}
@@ -204,6 +210,9 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
             <ZoomOut size={15} />
           </button>
           <select
+            id="zoom-select"
+            name="zoomSelect"
+            aria-label="Canvas Zoom Level"
             className="zoom-select"
             value={zoom}
             onChange={(e) => onZoomChange(Number(e.target.value))}

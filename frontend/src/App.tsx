@@ -1650,6 +1650,9 @@ export const App: React.FC = () => {
       {/* Hidden File Input for .dotproj import */}
       <input
         ref={fileInputRef}
+        id="hidden-project-file-import"
+        name="projectFileImport"
+        aria-label="Import Dot-to-Dot Project File"
         type="file"
         accept=".dotproj,application/json"
         style={{ display: 'none' }}

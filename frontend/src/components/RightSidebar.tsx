@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Sliders,
   Sparkles,
@@ -127,11 +127,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   isGenerating,
   validationReport,
   onSelectDotById,
-  mediaLibrary,
+  mediaLibrary = [],
   onOpenMediaLibrary,
   onApplyMedia,
-  activePageNumber,
-  pageCaption,
+  activePageNumber = 1,
+  pageCaption = '',
   onUpdatePageCaption,
   thresholdSensitivity,
   setThresholdSensitivity,
@@ -163,6 +163,13 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
   onSplitPathAtSelected,
 }) => {
   const [activeTab, setActiveTab] = useState<Tab>('inspector');
+
+  // Auto-switch to inspector when a dot is selected by user
+  useEffect(() => {
+    if (selectedDot) {
+      setActiveTab('inspector');
+    }
+  }, [selectedDot?.id]);
 
   const handleNudge = (dx: number, dy: number, isAlt: boolean = false) => {
     if (!selectedDot) return;
@@ -272,8 +279,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                 {/* Display Number & Sequence */}
                 <div className="form-group-row">
                   <div className="form-group">
-                    <label>Display #</label>
+                    <label htmlFor="dot-display-number">Display #</label>
                     <input
+                      id="dot-display-number"
+                      name="displayNumber"
+                      aria-label="Display Number"
                       type="number"
                       className="input-field"
                       value={selectedDot.displayNumber}
@@ -286,8 +296,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                     />
                   </div>
                   <div className="form-group">
-                    <label>Seq Index</label>
+                    <label htmlFor="dot-seq-index">Seq Index</label>
                     <input
+                      id="dot-seq-index"
+                      name="sequenceIndex"
+                      aria-label="Sequence Index"
                       type="text"
                       className="input-field input-readonly"
                       value={selectedDot.sequenceIndex}
@@ -300,8 +313,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                 <div className="sub-section-title">Dot Coordinates (pt)</div>
                 <div className="form-group-row">
                   <div className="form-group">
-                    <label>X</label>
+                    <label htmlFor="dot-x-coord">X</label>
                     <input
+                      id="dot-x-coord"
+                      name="xCoord"
+                      aria-label="X Coordinate"
                       type="number"
                       step="0.5"
                       className="input-field"
@@ -315,8 +331,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                     />
                   </div>
                   <div className="form-group">
-                    <label>Y</label>
+                    <label htmlFor="dot-y-coord">Y</label>
                     <input
+                      id="dot-y-coord"
+                      name="yCoord"
+                      aria-label="Y Coordinate"
                       type="number"
                       step="0.5"
                       className="input-field"
@@ -335,8 +354,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                 <div className="sub-section-title">Number Position (pt)</div>
                 <div className="form-group-row">
                   <div className="form-group">
-                    <label>Num X</label>
+                    <label htmlFor="dot-num-x">Num X</label>
                     <input
+                      id="dot-num-x"
+                      name="numberX"
+                      aria-label="Number X Position"
                       type="number"
                       step="0.5"
                       className="input-field"
@@ -350,8 +372,11 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
                     />
                   </div>
                   <div className="form-group">
-                    <label>Num Y</label>
+                    <label htmlFor="dot-num-y">Num Y</label>
                     <input
+                      id="dot-num-y"
+                      name="numberY"
+                      aria-label="Number Y Position"
                       type="number"
                       step="0.5"
                       className="input-field"
@@ -508,10 +533,13 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
               <h4 className="sub-section-title">Global Dimensions</h4>
               <div className="form-group">
                 <div className="slider-header">
-                  <label>Dot Radius</label>
+                  <label htmlFor="global-dot-radius">Dot Radius</label>
                   <span>{dotRadius} pt</span>
                 </div>
                 <input
+                  id="global-dot-radius"
+                  name="dotRadius"
+                  aria-label="Dot Radius"
                   type="range"
                   min="2"
                   max="7"
@@ -523,10 +551,13 @@ export const RightSidebar: React.FC<RightSidebarProps> = ({
 
               <div className="form-group">
                 <div className="slider-header">
-                  <label>Number Font Size</label>
+                  <label htmlFor="global-font-size">Number Font Size</label>
                   <span>{fontSize} pt</span>
                 </div>
                 <input
+                  id="global-font-size"
+                  name="fontSize"
+                  aria-label="Number Font Size"
                   type="range"
                   min="6"
                   max="14"
