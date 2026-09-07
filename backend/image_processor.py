@@ -34,17 +34,33 @@ def load_image_from_bytes(image_bytes: bytes) -> np.ndarray:
     return img_bgr
 
 
+from skimage.morphology import skeletonize
+from scipy.spatial import cKDTree
+
+
+def skeletonize_strokes(binary_lines: np.ndarray) -> np.ndarray:
+    """
+    Extracts the single-pixel centerline topological skeleton of ink strokes
+    using the fast, battle-tested Lee/Zhang-Suen algorithm via skimage.
+    Returns a binary uint8 mask (255 on centerline, 0 elsewhere).
+    """
+    skel = skeletonize(binary_lines > 0)
+    return (skel.astype(np.uint8) * 255)
+
+
 def preprocess_line_art(
     img_bgr: np.ndarray,
     noise_reduction: int = 1,
-    adaptive_thresh: bool = False
+    adaptive_thresh: bool = False,
+    threshold_sensitivity: int = 50
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Preprocesses the line art image:
     - Converts to grayscale
-    - Applies mild denoising
-    - Applies Otsu or Adaptive thresholding
+    - Applies mild Gaussian denoising
+    - Applies Otsu or Adaptive thresholding modulated by threshold_sensitivity (10-90)
     - Performs morphological close to mend minor breaks in lines
+    - Performs morphological open to eliminate specks
     Returns:
     - gray: Grayscale image
     - binary: Inverted binary image (lines are 255/white, background is 0/black)
@@ -59,14 +75,19 @@ def preprocess_line_art(
     # Contrast normalization
     gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
 
-    # Thresholding: black lines -> 255 foreground, white paper -> 0 background
+    # Thresholding modulated by sensitivity (10 = only dark heavy lines; 90 = picks up faint pencil sketches)
+    sens = max(10, min(90, threshold_sensitivity))
     if adaptive_thresh:
+        c_val = max(1, min(20, int(8 - (sens - 50) * 0.2)))
         binary = cv2.adaptiveThreshold(
-            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, 8
+            gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 15, c_val
         )
     else:
-        # Otsu thresholding
-        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        # Compute baseline Otsu threshold
+        otsu_val, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        # Modulate threshold based on sensitivity
+        target_t = int(np.clip(otsu_val + (sens - 50) * 1.5, 20, 245))
+        _, binary = cv2.threshold(gray, target_t, 255, cv2.THRESH_BINARY_INV)
 
     # Morphological closing to close tiny hairline gaps in strokes
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -155,19 +176,31 @@ def analyze_line_art(
     img_bgr: np.ndarray,
     noise_reduction: int = 1,
     adaptive_thresh: bool = False,
-    simplification_factor: float = 0.012
+    simplification_factor: float = 0.012,
+    threshold_sensitivity: int = 50,
+    snap_to_centerline: bool = True
 ) -> Dict[str, Any]:
     """
     Full deterministic image analysis:
-    - Preprocesses the image
+    - Preprocesses the image with sensitivity tuning
+    - Extracts the single-pixel stroke centerline skeleton
     - Extracts the outer silhouette
     - Extracts major internal contours
-    - Simplifies curves with Douglas-Peucker
+    - Simplifies curves with Douglas-Peucker & detects sharp corner anchors
     - Analyzes curvature and corner points
     Returns a dictionary of analysis results ready for dot budget allocation.
     """
     h, w = img_bgr.shape[:2]
-    gray, binary = preprocess_line_art(img_bgr, noise_reduction, adaptive_thresh)
+    gray, binary = preprocess_line_art(
+        img_bgr,
+        noise_reduction=noise_reduction,
+        adaptive_thresh=adaptive_thresh,
+        threshold_sensitivity=threshold_sensitivity
+    )
+
+    # Stroke centerline skeleton
+    skel_img = skeletonize_strokes(binary)
+    skel_pts = np.argwhere(skel_img > 0)[:, ::-1] # (x, y) coordinates
 
     # 1. Main outer silhouette
     outer_contour = extract_outer_silhouette_contour(binary)
@@ -245,10 +278,10 @@ def analyze_line_art(
 
         curvatures = calculate_contour_curvature(pts)
 
-        # Detect sharp corners (e.g. angle >= 35 deg)
-        corners = [i for i, angle in enumerate(curvatures) if angle >= 35.0]
+        # Detect sharp corners (e.g. angle >= 28 deg for high-fidelity apex capture)
+        corners = [i for i, angle in enumerate(curvatures) if angle >= 28.0]
 
-        processed_contours.append({
+        contour_dict = {
             "type": g["type"],
             "points": pts.tolist(),
             "curvatures": curvatures.tolist(),
@@ -256,10 +289,21 @@ def analyze_line_art(
             "perimeter": float(peri),
             "area": float(g["area"]),
             "is_closed": True
-        })
+        }
+
+        # Store raw contour and skeleton points for the outer silhouette
+        if g["type"] == "outer":
+            contour_dict["raw_contour"] = c.reshape((-1, 2)).tolist()
+            if len(skel_pts) > 0:
+                # Subsample skeleton pixels if large to keep payload fast & light
+                step_skel = max(1, len(skel_pts) // 3000)
+                contour_dict["skeleton_pixels"] = skel_pts[::step_skel].tolist()
+
+        processed_contours.append(contour_dict)
 
     return {
         "image_width": w,
         "image_height": h,
         "contours": processed_contours,
+        "snap_to_centerline": snap_to_centerline
     }

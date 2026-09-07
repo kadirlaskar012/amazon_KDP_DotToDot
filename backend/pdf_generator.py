@@ -13,13 +13,52 @@ Supports:
 """
 
 import io
+import math
 import base64
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 import numpy as np
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from reportlab.lib.utils import ImageReader
 from PIL import Image, ImageDraw, ImageFont
+
+
+def _draw_star(c: canvas.Canvas, cx: float, cy: float, r_outer: float, r_inner: float, fill_color, stroke_color=None, stroke_width: float = 1.0):
+    """Draws a vector 5-point star on a ReportLab canvas."""
+    p = c.beginPath()
+    for i in range(10):
+        r = r_outer if i % 2 == 0 else r_inner
+        angle = (i * math.pi) / 5.0 - math.pi / 2.0
+        x = cx + r * math.cos(angle)
+        y = cy + r * math.sin(angle)
+        if i == 0:
+            p.moveTo(x, y)
+        else:
+            p.lineTo(x, y)
+    p.close()
+    c.setFillColor(fill_color)
+    if stroke_color:
+        c.setStrokeColor(stroke_color)
+        c.setLineWidth(stroke_width)
+        c.drawPath(p, fill=1, stroke=1)
+    else:
+        c.drawPath(p, fill=1, stroke=0)
+
+
+def _draw_diamond(c: canvas.Canvas, cx: float, cy: float, r: float, fill_color, stroke_color=None):
+    """Draws a vector diamond polygon on a ReportLab canvas."""
+    p = c.beginPath()
+    p.moveTo(cx, cy + r * 1.3)
+    p.lineTo(cx + r * 1.3, cy)
+    p.lineTo(cx, cy - r * 1.3)
+    p.lineTo(cx - r * 1.3, cy)
+    p.close()
+    c.setFillColor(fill_color)
+    if stroke_color:
+        c.setStrokeColor(stroke_color)
+        c.drawPath(p, fill=1, stroke=1)
+    else:
+        c.drawPath(p, fill=1, stroke=0)
 
 
 def _render_belongs_to_page(c: canvas.Canvas, width_pt: float, height_pt: float, page_margin: float):
@@ -180,7 +219,13 @@ def _render_page_content(
     include_answer_key: bool = False,
     include_illustration: bool = True,
     illustration_image_base64: Optional[str] = None,
-    caption: Optional[str] = None
+    caption: Optional[str] = None,
+    start_marker_style: str = "star",
+    stop_marker_style: str = "double_circle",
+    faint_guidelines: str = "none",
+    faint_guideline_opacity: float = 0.18,
+    dot_shape: str = "circle",
+    number_placement: str = "outside",
 ):
     """Renders a single puzzle page onto a ReportLab Canvas."""
     # 1. Pure white background
@@ -229,38 +274,123 @@ def _render_page_content(
         except Exception as e:
             print(f"Error embedding illustration in PDF: {e}")
 
-    # 3. Optional Answer Key connecting lines
+    # Group dots by pathId for multi-path islands
+    sorted_dots = sorted(dots, key=lambda d: d.get("sequenceIndex", 0))
+    path_groups: Dict[int, List[Dict[str, Any]]] = {}
+    for d in sorted_dots:
+        pid = d.get("pathId", 1) or 1
+        path_groups.setdefault(pid, []).append(d)
+
+    start_dot_ids = set()
+    stop_dot_ids = set()
+    for pid, p_dots in path_groups.items():
+        if p_dots:
+            start_dot_ids.add(p_dots[0].get("id"))
+            if len(p_dots) > 1:
+                stop_dot_ids.add(p_dots[-1].get("id"))
+
+    # 3a. Faint Trace Guidelines (Toddler / Easy Tracing Mode)
+    if faint_guidelines in ("dotted", "dashed", "solid") and len(dots) > 1:
+        c.setStrokeColor(colors.Color(0.82, 0.82, 0.82))
+        c.setLineWidth(0.85)
+        if faint_guidelines == "dotted":
+            c.setDash([2, 3], 0)
+        elif faint_guidelines == "dashed":
+            c.setDash([5, 4], 0)
+        else:
+            c.setDash([], 0)
+
+        for pid, p_dots in path_groups.items():
+            if len(p_dots) > 1:
+                path = c.beginPath()
+                first_d = p_dots[0]
+                path.moveTo(first_d["x"], height_pt - first_d["y"])
+                for d in p_dots[1:]:
+                    path.lineTo(d["x"], height_pt - d["y"])
+                c.drawPath(path, stroke=1, fill=0)
+        c.setDash([], 0)
+
+    # 3b. Answer Key connecting lines (per path island)
     if include_answer_key and len(dots) > 1:
         c.setStrokeColor(colors.Color(0.2, 0.2, 0.2)) # Dark charcoal / black
         c.setLineWidth(0.75)
-        path = c.beginPath()
-        sorted_dots = sorted(dots, key=lambda d: d.get("sequenceIndex", 0))
-        first_d = sorted_dots[0]
-        path.moveTo(first_d["x"], height_pt - first_d["y"])
-        for d in sorted_dots[1:]:
-            path.lineTo(d["x"], height_pt - d["y"])
-        c.drawPath(path, stroke=1, fill=0)
+        c.setDash([], 0)
+        for pid, p_dots in path_groups.items():
+            if len(p_dots) > 1:
+                path = c.beginPath()
+                first_d = p_dots[0]
+                path.moveTo(first_d["x"], height_pt - first_d["y"])
+                for d in p_dots[1:]:
+                    path.lineTo(d["x"], height_pt - d["y"])
+                c.drawPath(path, stroke=1, fill=0)
 
-    # 4. Draw black dots
-    c.setFillColor(colors.black)
-    c.setStrokeColor(colors.black)
-
+    # 4. Draw vector dots
     for d in dots:
         if not d.get("visible", True):
             continue
         x = d["x"]
         y_pdf = height_pt - d["y"]
-        c.circle(x, y_pdf, dot_radius_pt, fill=1, stroke=0)
+        dot_id = d.get("id")
+        is_start = dot_id in start_dot_ids
+        is_stop = dot_id in stop_dot_ids
 
-    # 5. Draw black numbers
+        # Stop marker ring (if applicable)
+        if is_stop and stop_marker_style == "double_circle":
+            c.setStrokeColor(colors.Color(0.85, 0.2, 0.2))
+            c.setLineWidth(1.2)
+            c.circle(x, y_pdf, dot_radius_pt + 3.5, fill=0, stroke=1)
+
+        # Dot shape
+        if is_start and start_marker_style == "star":
+            _draw_star(c, x, y_pdf, dot_radius_pt * 1.6, dot_radius_pt * 0.72,
+                       fill_color=colors.Color(0.96, 0.62, 0.04),
+                       stroke_color=colors.Color(0.7, 0.4, 0.0),
+                       stroke_width=1.0)
+        elif dot_shape == "ring":
+            c.setFillColor(colors.white)
+            c.setStrokeColor(colors.black)
+            c.setLineWidth(1.5)
+            c.circle(x, y_pdf, dot_radius_pt, fill=1, stroke=1)
+        elif dot_shape == "star":
+            _draw_star(c, x, y_pdf, dot_radius_pt * 1.4, dot_radius_pt * 0.65, fill_color=colors.black)
+        elif dot_shape == "diamond":
+            _draw_diamond(c, x, y_pdf, dot_radius_pt, fill_color=colors.black)
+        elif dot_shape == "square":
+            c.setFillColor(colors.black)
+            c.rect(x - dot_radius_pt, y_pdf - dot_radius_pt, dot_radius_pt * 2, dot_radius_pt * 2, fill=1, stroke=0)
+        else: # default solid circle
+            c.setFillColor(colors.black)
+            c.circle(x, y_pdf, dot_radius_pt, fill=1, stroke=0)
+
+    # 5. Draw numbers and educational labels
     c.setFont("Helvetica-Bold", font_size_pt)
+    is_inside = (number_placement == "inside")
 
     for d in dots:
         if not d.get("visible", True):
             continue
-        num_str = str(d.get("displayNumber", ""))
-        nx = d.get("numberX", d["x"] + dot_radius_pt + 3)
-        ny_pdf = height_pt - d.get("numberY", d["y"]) - (font_size_pt * 0.35)
+        num_str = str(d.get("displayLabel") or d.get("displayNumber", ""))
+        x = d["x"]
+        y_pdf = height_pt - d["y"]
+
+        if is_inside:
+            nx = x
+            ny_pdf = y_pdf - (font_size_pt * 0.35)
+            text_color = colors.black if dot_shape == "ring" else colors.white
+        else:
+            nx = d.get("numberX", x + dot_radius_pt + 3)
+            ny_pdf = height_pt - d.get("numberY", d["y"]) - (font_size_pt * 0.35)
+            text_color = colors.black
+
+            # Circular white badge behind number for 100% legibility
+            if number_placement == "badge":
+                c.setFillColor(colors.white)
+                c.setStrokeColor(colors.Color(0.8, 0.8, 0.8))
+                c.setLineWidth(0.5)
+                badge_r = max(font_size_pt * 0.72, len(num_str) * font_size_pt * 0.36 + 2)
+                c.circle(nx, ny_pdf + (font_size_pt * 0.35), badge_r, fill=1, stroke=1)
+
+        c.setFillColor(text_color)
         c.drawCentredString(nx, ny_pdf, num_str)
 
     # 6. Bottom-Middle Puzzle Caption (strictly clamped inside Amazon KDP safe margin)
@@ -283,9 +413,15 @@ def generate_vector_pdf(
     include_answer_key: bool = False,
     include_illustration: bool = True,
     illustration_image_base64: Optional[str] = None,
-    caption: Optional[str] = None
+    caption: Optional[str] = None,
+    start_marker_style: str = "star",
+    stop_marker_style: str = "double_circle",
+    faint_guidelines: str = "none",
+    faint_guideline_opacity: float = 0.18,
+    dot_shape: str = "circle",
+    number_placement: str = "outside",
 ) -> bytes:
-    """Generates a single-page vector PDF."""
+    """Generates a single-page vector PDF with customized dot shapes, markers, and guidelines."""
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=(width_pt, height_pt))
 
@@ -300,11 +436,118 @@ def generate_vector_pdf(
         include_answer_key=include_answer_key,
         include_illustration=include_illustration,
         illustration_image_base64=illustration_image_base64,
-        caption=caption
+        caption=caption,
+        start_marker_style=start_marker_style,
+        stop_marker_style=stop_marker_style,
+        faint_guidelines=faint_guidelines,
+        faint_guideline_opacity=faint_guideline_opacity,
+        dot_shape=dot_shape,
+        number_placement=number_placement,
     )
     c.showPage()
     c.save()
     return buffer.getvalue()
+
+
+def _render_4up_answer_page(
+    c: canvas.Canvas,
+    quad_pages: List[Tuple[int, Dict[str, Any]]],
+    width_pt: float,
+    height_pt: float,
+    page_margin: float,
+    dot_radius_pt: float,
+    font_size_pt: float,
+    start_marker_style: str = "star",
+    stop_marker_style: str = "double_circle",
+    dot_shape: str = "circle",
+    number_placement: str = "outside",
+):
+    """Renders 4 puzzle solutions in a 2x2 grid on a single page with header and borders."""
+    c.setFillColor(colors.white)
+    c.rect(0, 0, width_pt, height_pt, fill=1, stroke=0)
+
+    # Page Header
+    c.setFont("Helvetica-Bold", 16)
+    c.setFillColor(colors.black)
+    c.drawCentredString(width_pt / 2.0, height_pt - page_margin + 6, "SOLUTIONS & ANSWER KEYS")
+
+    top_margin_adj = page_margin + 20.0
+    bottom_margin_adj = page_margin
+    usable_w = width_pt - 2.0 * page_margin
+    usable_h = height_pt - top_margin_adj - bottom_margin_adj
+
+    gap = 14.0
+    cell_w = (usable_w - gap) / 2.0
+    cell_h = (usable_h - gap) / 2.0
+
+    # Grid positions: (col_idx, row_idx) where row 1 is top, row 0 is bottom
+    positions = [
+        (0, 1),  # top-left
+        (1, 1),  # top-right
+        (0, 0),  # bottom-left
+        (1, 0),  # bottom-right
+    ]
+
+    for (col_idx, row_idx), (orig_idx, p) in zip(positions, quad_pages):
+        cell_x = page_margin + col_idx * (cell_w + gap)
+        cell_y = bottom_margin_adj + row_idx * (cell_h + gap)
+
+        # Draw clean border around cell
+        c.setStrokeColor(colors.Color(0.75, 0.75, 0.75))
+        c.setLineWidth(1)
+        c.rect(cell_x, cell_y, cell_w, cell_h, fill=0, stroke=1)
+
+        # Title at top of cell
+        p_cap = p.get("caption") or p.get("title") or f"Puzzle {orig_idx + 1}"
+        clean_cap = str(p_cap).strip().upper()[:28]
+        c.setFont("Helvetica-Bold", 9)
+        c.setFillColor(colors.black)
+        c.drawString(cell_x + 8, cell_y + cell_h - 14, f"PAGE {orig_idx + 1}: {clean_cap}")
+
+        p_dots = p.get("dots", [])
+        if not p_dots:
+            continue
+
+        inc_illus = p.get("includeIllustration", True)
+        illus_b64 = p.get("illustrationImageBase64", None)
+
+        inner_pad_x = 6.0
+        inner_pad_y = 6.0
+        title_h = 18.0
+        inner_w = cell_w - 2.0 * inner_pad_x
+        inner_h = cell_h - title_h - 2.0 * inner_pad_y
+
+        sub_scale = min(inner_w / max(1.0, width_pt), inner_h / max(1.0, height_pt))
+        fit_w = width_pt * sub_scale
+        fit_h = height_pt * sub_scale
+        offset_sub_x = cell_x + inner_pad_x + (inner_w - fit_w) / 2.0
+        offset_sub_y = cell_y + inner_pad_y + (inner_h - fit_h) / 2.0
+
+        c.saveState()
+        c.translate(offset_sub_x, offset_sub_y)
+        c.scale(sub_scale, sub_scale)
+
+        _render_page_content(
+            c=c,
+            dots=p_dots,
+            width_pt=width_pt,
+            height_pt=height_pt,
+            page_margin=page_margin,
+            dot_radius_pt=dot_radius_pt * 0.9,
+            font_size_pt=font_size_pt * 0.9,
+            include_answer_key=True,
+            include_illustration=inc_illus,
+            illustration_image_base64=illus_b64,
+            caption=None,
+            start_marker_style=start_marker_style,
+            stop_marker_style=stop_marker_style,
+            faint_guidelines="none",
+            dot_shape=dot_shape,
+            number_placement=number_placement,
+        )
+        c.restoreState()
+
+    c.showPage()
 
 
 def generate_book_pdf(
@@ -315,11 +558,18 @@ def generate_book_pdf(
     dot_radius_pt: float = 3.5,
     font_size_pt: float = 9.0,
     include_answer_key: bool = False,
+    answer_key_format: str = "compact_4up",
     book_title: str = "Dot-to-Dot Puzzle Book",
     include_belongs_to: bool = False,
     include_toc: bool = False,
     include_copyright: bool = False,
-    include_instructions: bool = False
+    include_instructions: bool = False,
+    start_marker_style: str = "star",
+    stop_marker_style: str = "double_circle",
+    faint_guidelines: str = "none",
+    faint_guideline_opacity: float = 0.18,
+    dot_shape: str = "circle",
+    number_placement: str = "outside",
 ) -> bytes:
     """
     Generates a complete multi-page PDF book for Amazon KDP & D2D.
@@ -329,6 +579,7 @@ def generate_book_pdf(
       - Table of Contents
       - How to Solve Instructions
     Followed by puzzle pages and optional answer key pages at the end.
+    Answer key layout can be "compact_4up" (4 per page) or "full_page".
     """
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=(width_pt, height_pt))
@@ -367,41 +618,83 @@ def generate_book_pdf(
             include_answer_key=False,  # Puzzle pages don't have lines
             include_illustration=inc_illus,
             illustration_image_base64=illus_b64,
-            caption=cap
+            caption=cap,
+            start_marker_style=start_marker_style,
+            stop_marker_style=stop_marker_style,
+            faint_guidelines=faint_guidelines,
+            faint_guideline_opacity=faint_guideline_opacity,
+            dot_shape=dot_shape,
+            number_placement=number_placement,
         )
         c.showPage()
 
     # 6. Append Solution / Answer Key pages at the back if requested
     if include_answer_key:
-        for idx, p in enumerate(pages):
-            p_dots = p.get("dots", [])
-            if not p_dots:
-                continue
-            inc_illus = p.get("includeIllustration", True)
-            illus_b64 = p.get("illustrationImageBase64", None)
-            cap = p.get("caption", None)
+        valid_pages = [(idx, p) for idx, p in enumerate(pages) if p.get("dots")]
+        if answer_key_format == "compact_4up":
+            # 4 solutions per page
+            for i in range(0, len(valid_pages), 4):
+                quad = valid_pages[i:i + 4]
+                _render_4up_answer_page(
+                    c=c,
+                    quad_pages=quad,
+                    width_pt=width_pt,
+                    height_pt=height_pt,
+                    page_margin=page_margin,
+                    dot_radius_pt=dot_radius_pt,
+                    font_size_pt=font_size_pt,
+                    start_marker_style=start_marker_style,
+                    stop_marker_style=stop_marker_style,
+                    dot_shape=dot_shape,
+                    number_placement=number_placement,
+                )
+        else:
+            # 1 full page per solution
+            for idx, p in valid_pages:
+                p_dots = p.get("dots", [])
+                inc_illus = p.get("includeIllustration", True)
+                illus_b64 = p.get("illustrationImageBase64", None)
+                cap = p.get("caption", None)
 
-            _render_page_content(
-                c=c,
-                dots=p_dots,
-                width_pt=width_pt,
-                height_pt=height_pt,
-                page_margin=page_margin,
-                dot_radius_pt=dot_radius_pt * 0.8,
-                font_size_pt=font_size_pt * 0.8,
-                include_answer_key=True,  # Solution lines drawn
-                include_illustration=inc_illus,
-                illustration_image_base64=illus_b64,
-                caption=f"{cap} (Answer Key)" if cap else f"Answer Key - Page {idx + 1}"
-            )
-            # Add header banner at top of answer page
-            c.setFont("Helvetica-Bold", 11)
-            c.setFillColor(colors.black)
-            c.drawCentredString(width_pt / 2.0, height_pt - page_margin / 2.0, f"Answer Key - Page {idx + 1}")
-            c.showPage()
+                _render_page_content(
+                    c=c,
+                    dots=p_dots,
+                    width_pt=width_pt,
+                    height_pt=height_pt,
+                    page_margin=page_margin,
+                    dot_radius_pt=dot_radius_pt * 0.8,
+                    font_size_pt=font_size_pt * 0.8,
+                    include_answer_key=True,
+                    include_illustration=inc_illus,
+                    illustration_image_base64=illus_b64,
+                    caption=f"{cap} (Answer Key)" if cap else f"Answer Key - Page {idx + 1}",
+                    start_marker_style=start_marker_style,
+                    stop_marker_style=stop_marker_style,
+                    faint_guidelines="none",
+                    dot_shape=dot_shape,
+                    number_placement=number_placement,
+                )
+                c.setFont("Helvetica-Bold", 11)
+                c.setFillColor(colors.black)
+                c.drawCentredString(width_pt / 2.0, height_pt - page_margin / 2.0, f"Answer Key - Page {idx + 1}")
+                c.showPage()
 
     c.save()
     return buffer.getvalue()
+
+
+def _get_star_polygon(cx: float, cy: float, r_outer: float, r_inner: float):
+    pts = []
+    angle_offset = -math.pi / 2.0
+    for i in range(10):
+        r = r_outer if i % 2 == 0 else r_inner
+        ang = angle_offset + (i * math.pi / 5.0)
+        pts.append((cx + r * math.cos(ang), cy + r * math.sin(ang)))
+    return pts
+
+
+def _get_diamond_polygon(cx: float, cy: float, r: float):
+    return [(cx, cy - r), (cx + r, cy), (cx, cy + r), (cx - r, cy)]
 
 
 def generate_raster_png(
@@ -415,13 +708,23 @@ def generate_raster_png(
     include_answer_key: bool = False,
     include_illustration: bool = True,
     illustration_image_base64: Optional[str] = None,
-    caption: Optional[str] = None
+    caption: Optional[str] = None,
+    start_marker_style: str = "star",
+    stop_marker_style: str = "double_circle",
+    faint_guidelines: str = "none",
+    faint_guideline_opacity: float = 0.18,
+    dot_shape: str = "circle",
+    number_placement: str = "outside",
 ) -> bytes:
     """
     Generates a print-ready 300 or 600 DPI PNG with anti-aliasing.
     - Pure white background.
     - Optional Hybrid Illustration Layer.
-    - Pure black dots and numbers.
+    - Multi-path / island loop support.
+    - Faint trace guidelines underlay.
+    - Vector shapes: Circle, Ring, Star, Diamond, Square.
+    - Star start and double-circle stop markers.
+    - Educational labels & White badge legibility backings.
     - Bottom-middle puzzle caption inside safe margins.
     """
     scale = dpi / 72.0
@@ -437,7 +740,7 @@ def generate_raster_png(
     dot_r_px = dot_radius_pt * total_scale
     font_size_px = int(round(font_size_pt * total_scale))
 
-    # Paste Hybrid Illustration Layer if requested
+    # 1. Paste Hybrid Illustration Layer if requested
     if include_illustration and illustration_image_base64:
         try:
             raw_b64 = illustration_image_base64
@@ -478,31 +781,99 @@ def generate_raster_png(
             except Exception:
                 font = ImageFont.load_default()
 
-    # Optional Answer Key lines
-    if include_answer_key and len(dots) > 1:
-        sorted_dots = sorted(dots, key=lambda d: d.get("sequenceIndex", 0))
-        pts = [(d["x"] * total_scale, d["y"] * total_scale) for d in sorted_dots]
-        line_w = max(1, int(round(1.0 * total_scale)))
-        draw.line(pts, fill=(50, 50, 50), width=line_w)
+    # Group dots by pathId for multi-path islands
+    sorted_dots = sorted(dots, key=lambda d: d.get("sequenceIndex", 0))
+    path_groups: Dict[int, List[Dict[str, Any]]] = {}
+    for d in sorted_dots:
+        pid = d.get("pathId", 1) or 1
+        path_groups.setdefault(pid, []).append(d)
 
-    # Draw dots
+    start_dot_ids = set()
+    stop_dot_ids = set()
+    for pid, p_dots in path_groups.items():
+        if p_dots:
+            start_dot_ids.add(p_dots[0].get("id"))
+            if len(p_dots) > 1:
+                stop_dot_ids.add(p_dots[-1].get("id"))
+
+    # 2. Faint Trace Guidelines (underlay connecting lines)
+    if faint_guidelines in ("dotted", "dashed", "solid") and len(dots) > 1:
+        guide_w = max(1, int(round(0.85 * total_scale)))
+        guide_color = (210, 210, 210, 255)
+        for pid, p_dots in path_groups.items():
+            if len(p_dots) > 1:
+                pts = [(d["x"] * total_scale, d["y"] * total_scale) for d in p_dots]
+                draw.line(pts, fill=guide_color, width=guide_w)
+
+    # 3. Optional Answer Key connecting lines (per path island)
+    if include_answer_key and len(dots) > 1:
+        line_w = max(1, int(round(1.0 * total_scale)))
+        for pid, p_dots in path_groups.items():
+            if len(p_dots) > 1:
+                pts = [(d["x"] * total_scale, d["y"] * total_scale) for d in p_dots]
+                draw.line(pts, fill=(50, 50, 50, 255), width=line_w)
+
+    # 4. Draw dots with custom shapes and start/stop markers
     for d in dots:
         if not d.get("visible", True):
             continue
         cx = d["x"] * total_scale
         cy = d["y"] * total_scale
-        draw.ellipse([cx - dot_r_px, cy - dot_r_px, cx + dot_r_px, cy + dot_r_px], fill=(0, 0, 0))
+        dot_id = d.get("id")
+        is_start = dot_id in start_dot_ids
+        is_stop = dot_id in stop_dot_ids
 
-    # Draw numbers centered at exact (numberX, numberY) with anchor="mm"
+        # Stop marker: double concentric ring
+        if is_stop and stop_marker_style == "double_circle":
+            stop_r = dot_r_px + (3.5 * total_scale)
+            draw.ellipse([cx - stop_r, cy - stop_r, cx + stop_r, cy + stop_r],
+                         outline=(220, 50, 50, 255), width=max(1, int(round(1.2 * total_scale))))
+
+        # Start marker or chosen shape
+        if is_start and start_marker_style == "star":
+            star_pts = _get_star_polygon(cx, cy, dot_r_px * 1.6, dot_r_px * 0.72)
+            draw.polygon(star_pts, fill=(245, 158, 11, 255), outline=(180, 100, 0, 255))
+        elif dot_shape == "ring":
+            ring_w = max(1, int(round(1.5 * total_scale)))
+            draw.ellipse([cx - dot_r_px, cy - dot_r_px, cx + dot_r_px, cy + dot_r_px],
+                         fill=(255, 255, 255, 255), outline=(0, 0, 0, 255), width=ring_w)
+        elif dot_shape == "star":
+            star_pts = _get_star_polygon(cx, cy, dot_r_px * 1.4, dot_r_px * 0.65)
+            draw.polygon(star_pts, fill=(0, 0, 0, 255))
+        elif dot_shape == "diamond":
+            diamond_pts = _get_diamond_polygon(cx, cy, dot_r_px * 1.1)
+            draw.polygon(diamond_pts, fill=(0, 0, 0, 255))
+        elif dot_shape == "square":
+            draw.rectangle([cx - dot_r_px, cy - dot_r_px, cx + dot_r_px, cy + dot_r_px], fill=(0, 0, 0, 255))
+        else: # solid circle
+            draw.ellipse([cx - dot_r_px, cy - dot_r_px, cx + dot_r_px, cy + dot_r_px], fill=(0, 0, 0, 255))
+
+    # 5. Draw numbers and educational labels
+    is_inside = (number_placement == "inside")
     for d in dots:
         if not d.get("visible", True):
             continue
-        num_str = str(d.get("displayNumber", ""))
-        nx = d.get("numberX", d["x"] + dot_radius_pt + 5) * total_scale
-        ny = d.get("numberY", d["y"]) * total_scale
-        draw.text((nx, ny), num_str, fill=(0, 0, 0), font=font, anchor="mm")
+        num_str = str(d.get("displayLabel") or d.get("displayNumber", ""))
 
-    # Bottom-middle puzzle caption in PNG
+        if is_inside:
+            nx = d["x"] * total_scale
+            ny = d["y"] * total_scale
+            text_color = (0, 0, 0, 255) if dot_shape == "ring" else (255, 255, 255, 255)
+        else:
+            nx = d.get("numberX", d["x"] + dot_radius_pt + 5) * total_scale
+            ny = d.get("numberY", d["y"]) * total_scale
+            text_color = (0, 0, 0, 255)
+
+            # Circular white badge behind number for 100% legibility
+            if number_placement == "badge":
+                badge_r = max(font_size_px * 0.72, len(num_str) * font_size_px * 0.36 + (2.0 * total_scale))
+                draw.ellipse([nx - badge_r, ny - badge_r, nx + badge_r, ny + badge_r],
+                             fill=(255, 255, 255, 255), outline=(200, 200, 200, 255),
+                             width=max(1, int(round(0.5 * total_scale))))
+
+        draw.text((nx, ny), num_str, fill=text_color, font=font, anchor="mm")
+
+    # 6. Bottom-middle puzzle caption in PNG
     if caption and caption.strip():
         clean_cap = caption.strip().upper()
         cap_size_px = int(round(18.0 * total_scale))
@@ -512,7 +883,7 @@ def generate_raster_png(
             cap_font = font
         cap_x = (width_pt / 2.0) * total_scale
         cap_y = (height_pt - page_margin - 12) * total_scale
-        draw.text((cap_x, cap_y), clean_cap, fill=(0, 0, 0), font=cap_font, anchor="mm")
+        draw.text((cap_x, cap_y), clean_cap, fill=(0, 0, 0, 255), font=cap_font, anchor="mm")
 
     # Downscale supersampled image to final pixel dimensions using high-quality Lanczos filter
     final_img = img.resize((pixel_w, pixel_h), Image.Resampling.LANCZOS)

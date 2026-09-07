@@ -20,22 +20,30 @@ DIFFICULTY_PRESETS = {
 }
 
 
+from shapely.geometry import LineString
+from scipy.spatial import cKDTree
+
+
 def compute_euclidean_distance(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
     return math.hypot(p1[0] - p2[0], p1[1] - p2[1])
 
 
-def resample_polygon_evenly(
+def resample_polygon_curvature_adaptive(
     vertices: List[List[float]],
     target_count: int,
+    raw_contour: Optional[List[List[float]]] = None,
+    skeleton_pixels: Optional[List[List[float]]] = None,
+    snap_to_centerline: bool = True,
     min_dist: float = 10.0,
     img_w: float = 600.0
 ) -> List[Tuple[float, float]]:
     """
-    Evenly samples target_count points along a closed polygon contour:
-    - Preserves all key corner/inflection vertices so sharp tips, snouts, ears, and fins are maintained.
-    - Distributes intermediate points along edges proportionally to edge lengths.
-    - Guarantees sequential, cyclic ordering with ZERO backtracking or crisscrossing cuts.
-    - Rotates sequence so Dot 1 starts at the apex/top (minimum Y, closest to center X).
+    Intelligently samples target_count points along a closed polygon contour:
+    - 1. Corner & Apex Anchoring: Preserves all key corner/inflection vertices (ears, paws, snouts, fins).
+    - 2. Curvature-Weighted Density: Allocates more dots to tight curves and fewer dots to straight edges.
+    - 3. Zero Criss-Cross Guarantee: Uses Shapely to verify simple Jordan closed loops without line crossings.
+    - 4. Centerline Skeleton Snapping: When enabled, snaps coordinates toward ink stroke centerlines.
+    - 5. Apex Rotation: Guarantees Dot 1 starts at the top-most apex (min Y, closest to center X).
     """
     n = len(vertices)
     if n < 3:
@@ -43,7 +51,7 @@ def resample_polygon_evenly(
 
     pts = [np.array(p, dtype=float) for p in vertices]
 
-    # Compute edge lengths
+    # Compute Douglas-Peucker edge lengths
     edge_lengths = []
     for i in range(n):
         p1 = pts[i]
@@ -54,38 +62,134 @@ def resample_polygon_evenly(
     if total_len <= 0:
         return [(float(p[0]), float(p[1])) for p in vertices]
 
+    # If target count is smaller than anchor vertices count, keep top anchors
     if target_count <= n:
         result = [(float(round(p[0], 1)), float(round(p[1], 1))) for p in pts[:target_count]]
-    else:
-        extra_points = target_count - n
-        edge_extra = []
-        for L in edge_lengths:
-            quota = (L / total_len) * extra_points
-            edge_extra.append(int(round(quota)))
+        if result:
+            top_idx = min(
+                range(len(result)),
+                key=lambda i: (result[i][1], abs(result[i][0] - (img_w / 2.0)))
+            )
+            result = result[top_idx:] + result[:top_idx]
+        return result
 
-        diff = extra_points - sum(edge_extra)
-        if diff != 0:
-            sorted_indices = sorted(range(n), key=lambda i: edge_lengths[i], reverse=True)
-            for i in range(abs(diff)):
-                idx = sorted_indices[i % n]
-                edge_extra[idx] += 1 if diff > 0 else -1
-                edge_extra[idx] = max(0, edge_extra[idx])
+    extra_points = target_count - n
 
-        result = []
+    # Curvature-adaptive weighting
+    if raw_contour and len(raw_contour) > n:
+        raw_arr = np.array(raw_contour, dtype=float)
+        indices = []
+        for v in pts:
+            dists = np.hypot(raw_arr[:, 0] - v[0], raw_arr[:, 1] - v[1])
+            indices.append(int(np.argmin(dists)))
+
+        edge_curvs = []
+        arcs = []
         for i in range(n):
-            p1 = pts[i]
-            p2 = pts[(i + 1) % n]
-            result.append((float(round(p1[0], 1)), float(round(p1[1], 1))))
+            i1 = indices[i]
+            i2 = indices[(i + 1) % n]
+            if i2 > i1:
+                arc = raw_arr[i1:i2 + 1]
+            else:
+                arc = np.vstack([raw_arr[i1:], raw_arr[:i2 + 1]])
+            arcs.append(arc)
 
-            k = edge_extra[i]
+            p1, p2 = pts[i], pts[(i + 1) % n]
+            v_line = p2 - p1
+            line_len = edge_lengths[i]
+            if line_len > 1e-4 and len(arc) > 2:
+                # Perpendicular deviation of arc from straight chord
+                cross = np.abs((arc[:, 0] - p1[0]) * v_line[1] - (arc[:, 1] - p1[1]) * v_line[0]) / line_len
+                max_dev = float(np.max(cross))
+            else:
+                max_dev = 0.0
+            edge_curvs.append(max_dev)
+
+        # Segment weight formula: length * (1.0 + alpha * curvature_height / length)
+        weights = [L * (1.0 + 3.0 * (C / max(1.0, L))) for L, C in zip(edge_lengths, edge_curvs)]
+    else:
+        weights = list(edge_lengths)
+        arcs = [None] * n
+
+    tot_w = sum(weights)
+    quotas = [int(round((w_i / max(1e-5, tot_w)) * extra_points)) for w_i in weights]
+    diff = extra_points - sum(quotas)
+    if diff != 0:
+        sorted_indices = sorted(range(n), key=lambda i: weights[i], reverse=True)
+        for s in range(abs(diff)):
+            idx = sorted_indices[s % n]
+            quotas[idx] += 1 if diff > 0 else -1
+            quotas[idx] = max(0, quotas[idx])
+
+    # Build linear and curved candidate sequences
+    linear_pts = []
+    curved_pts = []
+    for i in range(n):
+        p1 = pts[i]
+        p2 = pts[(i + 1) % n]
+        linear_pts.append((float(round(p1[0], 1)), float(round(p1[1], 1))))
+        curved_pts.append((float(round(p1[0], 1)), float(round(p1[1], 1))))
+
+        k = quotas[i]
+        arc = arcs[i]
+        if k > 0:
+            # Linear chord points
             for step in range(1, k + 1):
-                t = step / (k + 1)
+                t = step / (k + 1.0)
                 interp = (1.0 - t) * p1 + t * p2
-                result.append((float(round(interp[0], 1)), float(round(interp[1], 1))))
+                linear_pts.append((float(round(interp[0], 1)), float(round(interp[1], 1))))
 
-    # Filter any adjacent points that might be too close
+            # Curved arc points (preserving real drawing contours)
+            if arc is not None and len(arc) > 1:
+                diffs = np.diff(arc, axis=0)
+                cum = np.insert(np.cumsum(np.hypot(diffs[:, 0], diffs[:, 1])), 0, 0.0)
+                tot_d = cum[-1]
+                if tot_d > 0:
+                    for step in range(1, k + 1):
+                        td = (step / (k + 1.0)) * tot_d
+                        idx_pt = np.searchsorted(cum, td)
+                        pt = arc[min(len(arc) - 1, idx_pt)]
+                        curved_pts.append((float(round(pt[0], 1)), float(round(pt[1], 1))))
+                else:
+                    for step in range(1, k + 1):
+                        t = step / (k + 1.0)
+                        interp = (1.0 - t) * p1 + t * p2
+                        curved_pts.append((float(round(interp[0], 1)), float(round(interp[1], 1))))
+            else:
+                for step in range(1, k + 1):
+                    t = step / (k + 1.0)
+                    interp = (1.0 - t) * p1 + t * p2
+                    curved_pts.append((float(round(interp[0], 1)), float(round(interp[1], 1))))
+
+    # Zero Criss-Cross Guarantee
+    try:
+        ls_curved = LineString(curved_pts + [curved_pts[0]])
+        chosen_pts = curved_pts if ls_curved.is_simple else linear_pts
+    except Exception:
+        chosen_pts = linear_pts
+
+    # Centerline Skeleton Snapping (aligns dots directly with ink stroke center)
+    if snap_to_centerline and skeleton_pixels and len(skeleton_pixels) > 0:
+        try:
+            sk_arr = np.array(skeleton_pixels, dtype=float)
+            tree = cKDTree(sk_arr)
+            snapped_pts = []
+            for p in chosen_pts:
+                d, idx = tree.query(p)
+                if d <= 12.0:
+                    sp = sk_arr[idx]
+                    snapped_pts.append((float(round(sp[0], 1)), float(round(sp[1], 1))))
+                else:
+                    snapped_pts.append(p)
+            ls_snapped = LineString(snapped_pts + [snapped_pts[0]])
+            if ls_snapped.is_simple:
+                chosen_pts = snapped_pts
+        except Exception:
+            pass
+
+    # Filter adjacent points that might be closer than print-safety minimum distance
     filtered: List[Tuple[float, float]] = []
-    for pt in result:
+    for pt in chosen_pts:
         if not filtered:
             filtered.append(pt)
         else:
@@ -268,10 +372,17 @@ def generate_dots_from_analysis(
     if not outer_group:
         return []
 
-    # Resample the outer silhouette smoothly and sequentially
-    sampled_image_pts = resample_polygon_evenly(
+    # Resample the outer silhouette with curvature-adaptive density, locked anchors, and zero criss-crossing
+    raw_contour = outer_group.get("raw_contour")
+    skeleton_pixels = outer_group.get("skeleton_pixels")
+    snap_to_centerline = analysis.get("snap_to_centerline", True)
+
+    sampled_image_pts = resample_polygon_curvature_adaptive(
         outer_group["points"],
         target_count=total_budget,
+        raw_contour=raw_contour,
+        skeleton_pixels=skeleton_pixels,
+        snap_to_centerline=snap_to_centerline,
         min_dist=min_dist_px,
         img_w=float(img_w)
     )

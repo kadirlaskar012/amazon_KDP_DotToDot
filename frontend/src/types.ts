@@ -2,6 +2,8 @@ export interface Dot {
   id: string;
   sequenceIndex: number;
   displayNumber: number;
+  displayLabel?: string;
+  pathId?: number;
   x: number;
   y: number;
   numberX: number;
@@ -9,6 +11,13 @@ export interface Dot {
   source: 'auto' | 'manual';
   visible: boolean;
 }
+
+export type StartMarkerStyle = 'star' | 'circle' | 'flag' | 'none';
+export type StopMarkerStyle = 'double_circle' | 'badge' | 'circle' | 'none';
+export type FaintGuidelineStyle = 'none' | 'dotted' | 'dashed' | 'solid';
+export type NumberingMode = 'numbers' | 'letters_upper' | 'letters_lower' | 'skip_2' | 'skip_5' | 'skip_10' | 'roman';
+export type DotShape = 'circle' | 'ring' | 'star' | 'diamond' | 'square';
+export type NumberPlacement = 'outside' | 'inside' | 'badge';
 
 export type PagePreset = 'letter' | 'a4' | 'square' | 'novel' | 'custom';
 
@@ -118,6 +127,15 @@ export interface ProjectData {
   referenceLocked: boolean;
   showAnswer: boolean;
   snapToGrid: boolean;
+  // Pure Dot-to-Dot Puzzle Styling Preferences
+  startMarkerStyle?: StartMarkerStyle;
+  stopMarkerStyle?: StopMarkerStyle;
+  faintGuidelines?: FaintGuidelineStyle;
+  faintGuidelineOpacity?: number;
+  numberingMode?: NumberingMode;
+  dotShape?: DotShape;
+  numberPlacement?: NumberPlacement;
+  numberOffsetDist?: number;
   // Multi-page book architecture
   pages: PageItem[];
   activePageIndex: number;

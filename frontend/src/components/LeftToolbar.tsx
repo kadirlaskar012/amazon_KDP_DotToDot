@@ -13,6 +13,7 @@ import {
   Eraser,
   RotateCcw,
   SquareDashed,
+  Magnet,
 } from 'lucide-react';
 import type { Tool } from '../types';
 
@@ -30,6 +31,8 @@ interface LeftToolbarProps {
   eraserSize: number;
   setEraserSize: (size: number) => void;
   onRestoreIllustration?: () => void;
+  magneticSnapEnabled?: boolean;
+  onToggleMagneticSnap?: () => void;
 }
 
 export const LeftToolbar: React.FC<LeftToolbarProps> = ({
@@ -46,6 +49,8 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
   eraserSize,
   setEraserSize,
   onRestoreIllustration,
+  magneticSnapEnabled = false,
+  onToggleMagneticSnap,
 }) => {
   const isMaxReached = dotsCount >= maxDots;
 
@@ -144,6 +149,25 @@ export const LeftToolbar: React.FC<LeftToolbarProps> = ({
           <Crosshair size={18} />
           <span className="tool-indicator">{crosshairEnabled ? 'ON' : 'OFF'}</span>
         </button>
+        {onToggleMagneticSnap && (
+          <button
+            className={`tool-btn ${magneticSnapEnabled ? 'tool-active' : ''}`}
+            onClick={onToggleMagneticSnap}
+            title={`Magnetic Stroke Snap (G): ${magneticSnapEnabled ? 'ON' : 'OFF'}`}
+            style={
+              magneticSnapEnabled
+                ? {
+                    color: '#06b6d4',
+                    borderColor: '#0891b2',
+                    backgroundColor: 'rgba(6, 182, 212, 0.15)',
+                  }
+                : undefined
+            }
+          >
+            <Magnet size={18} />
+            <span className="tool-indicator">{magneticSnapEnabled ? 'ON' : 'OFF'}</span>
+          </button>
+        )}
         {onToggleSafeMargins && (
           <button
             className={`tool-btn ${safeMarginsVisible ? 'tool-active' : ''}`}

@@ -52,6 +52,7 @@ interface TopToolbarProps {
   dotsCount: number;
   totalPages?: number;
   activePageNumber?: number;
+  onOpenBulkBookModal?: () => void;
 }
 
 export const TopToolbar: React.FC<TopToolbarProps> = ({
@@ -84,6 +85,7 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
   dotsCount,
   totalPages = 1,
   activePageNumber = 1,
+  onOpenBulkBookModal,
 }) => {
   return (
     <header className="top-toolbar">
@@ -300,8 +302,33 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         </div>
       </div>
 
-      {/* 3. RIGHT ZONE: Highlighted, Permanent Export Button (ALWAYS VISIBLE ON SCREEN) */}
-      <div className="top-toolbar-right">
+      {/* 3. RIGHT ZONE: Highlighted Bulk Book Creator & Export Button */}
+      <div className="top-toolbar-right" style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        {onOpenBulkBookModal && (
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={onOpenBulkBookModal}
+            title="Open Bulk Book Creator to batch process multiple illustrations into a KDP book"
+            style={{
+              background: 'linear-gradient(135deg, rgba(37, 99, 235, 0.2), rgba(124, 58, 237, 0.25))',
+              borderColor: '#6366f1',
+              color: '#c7d2fe',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 11px',
+              fontWeight: 600,
+              fontSize: '12px',
+              borderRadius: '6px',
+              cursor: 'pointer',
+            }}
+          >
+            <BookPlus size={15} color="#818cf8" />
+            <span>Bulk Book</span>
+          </button>
+        )}
+
         <button
           className="btn-export-highlight"
           onClick={onOpenExportModal}

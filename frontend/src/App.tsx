@@ -10,6 +10,12 @@ import type {
   ProjectData,
   PageItem,
   MediaItem,
+  StartMarkerStyle,
+  StopMarkerStyle,
+  FaintGuidelineStyle,
+  NumberingMode,
+  DotShape,
+  NumberPlacement,
 } from './types';
 import { TopToolbar } from './components/TopToolbar';
 import { LeftToolbar } from './components/LeftToolbar';
@@ -22,6 +28,16 @@ import { NewProjectModal } from './components/NewProjectModal';
 import { PageTimeline } from './components/PageTimeline';
 import { MediaLibraryModal } from './components/MediaLibraryModal';
 import { OpenProjectModal } from './components/OpenProjectModal';
+import { BulkBookModal } from './components/BulkBookModal';
+import { optimizeDotLabels } from './utils/labelCollision';
+import { applyNumberingModeToDots } from './utils/educationalNumbering';
+import {
+  rotateStartDot,
+  reversePathDirection,
+  detectLineCrossings,
+  untangleLineCrossings,
+  smoothDotPath,
+} from './utils/pathOperations';
 import { importProjectFromFile, saveProjectToDisk, loadProjectFromDisk } from './utils/projectIO';
 import { saveWorkspaceDraft, getWorkspaceDraft } from './utils/workspaceStorage';
 
@@ -124,6 +140,8 @@ export const App: React.FC = () => {
   // Generator Configuration
   const [difficultyPreset, setDifficultyPreset] = useState<DifficultyPreset>('detailed');
   const [customMaxDots, setCustomMaxDots] = useState(105);
+  const [thresholdSensitivity, setThresholdSensitivity] = useState<number>(50);
+  const [snapToCenterline, setSnapToCenterline] = useState<boolean>(true);
   const [isGenerating, setIsGenerating] = useState(false);
   const [selectedSampleId, setSelectedSampleId] = useState<string | null>('dinosaur');
 
@@ -132,8 +150,23 @@ export const App: React.FC = () => {
   const [samples, setSamples] = useState<SampleItem[]>([]);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
   const [isSampleModalOpen, setIsSampleModalOpen] = useState(false);
+  const [isBulkBookModalOpen, setIsBulkBookModalOpen] = useState(false);
+  const [magneticSnapEnabled, setMagneticSnapEnabled] = useState(true);
   const [isExporting, setIsExporting] = useState(false);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Pure Dot-to-Dot Puzzle Styling Preferences
+  const [startMarkerStyle, setStartMarkerStyle] = useState<StartMarkerStyle>('star');
+  const [stopMarkerStyle, setStopMarkerStyle] = useState<StopMarkerStyle>('double_circle');
+  const [faintGuidelines, setFaintGuidelines] = useState<FaintGuidelineStyle>('none');
+  const [faintGuidelineOpacity, setFaintGuidelineOpacity] = useState<number>(0.18);
+  const [numberingMode, setNumberingMode] = useState<NumberingMode>('numbers');
+  const [dotShape, setDotShape] = useState<DotShape>('circle');
+  const [numberPlacement, setNumberPlacement] = useState<NumberPlacement>('outside');
+
+  const lineCrossingsCount = React.useMemo(() => {
+    return detectLineCrossings(dots).count;
+  }, [dots]);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -269,6 +302,13 @@ export const App: React.FC = () => {
         else if (e.key.toLowerCase() === 'x') setActiveTool('eraseLine');
         else if (e.key.toLowerCase() === 'h') setActiveTool('pan');
         else if (e.key.toLowerCase() === 'z') setActiveTool('zoom');
+        else if (e.key.toLowerCase() === 'g') {
+          setMagneticSnapEnabled((prev) => {
+            const next = !prev;
+            showToast(`Magnetic Stroke Snap: ${next ? 'ON' : 'OFF'}`);
+            return next;
+          });
+        }
       }
     };
 
@@ -426,6 +466,8 @@ export const App: React.FC = () => {
       formData.append('page_margin', String(pageSetup.marginPt));
       formData.append('dot_radius', String(dotRadius));
       formData.append('font_size', String(fontSize));
+      formData.append('threshold_sensitivity', String(thresholdSensitivity));
+      formData.append('snap_to_centerline', String(snapToCenterline));
 
       const res = await fetch(`${API_BASE}/api/analyze-and-generate`, {
         method: 'POST',
@@ -497,6 +539,8 @@ export const App: React.FC = () => {
       formData.append('page_margin', String(pageSetup.marginPt));
       formData.append('dot_radius', String(dotRadius));
       formData.append('font_size', String(fontSize));
+      formData.append('threshold_sensitivity', String(thresholdSensitivity));
+      formData.append('snap_to_centerline', String(snapToCenterline));
 
       const res = await fetch(`${API_BASE}/api/analyze-and-generate`, {
         method: 'POST',
@@ -741,12 +785,25 @@ export const App: React.FC = () => {
     e.stopPropagation();
   };
 
-  // Auto Generate Dots with current settings
-  const handleGenerateDots = () => {
+  // Auto Generate Dots with current settings (supports live re-tracing of uploaded image or sample)
+  const handleGenerateDots = async () => {
     if (selectedSampleId) {
       loadSampleAndGenerate(selectedSampleId);
     } else if (referenceImage) {
-      showToast('Select a sample or re-upload image to trace.');
+      try {
+        setIsGenerating(true);
+        // Re-trace the active referenceImage data URI
+        const fetchRes = await fetch(referenceImage);
+        const blob = await fetchRes.blob();
+        const file = new File([blob], `${pageCaption || 'image'}.png`, { type: 'image/png' });
+        await processImageFile(file);
+      } catch (err) {
+        console.error(err);
+        showToast('Error re-generating dots from current image.');
+        setIsGenerating(false);
+      }
+    } else {
+      showToast('Select a sample or upload an image to trace.');
     }
   };
 
@@ -772,31 +829,105 @@ export const App: React.FC = () => {
     runValidation(renumbered);
   };
 
-  // Auto Position Numbers
+  // Auto Position Numbers (Client-side 8-way radial collision solver with API fallback)
   const handleAutoPositionNumbers = async () => {
     if (dots.length === 0) return;
     try {
-      const res = await fetch(`${API_BASE}/api/reposition-numbers`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          dots,
-          canvasWidth: pageSetup.widthPt,
-          canvasHeight: pageSetup.heightPt,
-          pageMargin: pageSetup.marginPt,
-          dotRadius,
-          fontSize,
-        }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        updateDotsWithHistory(data.dots);
-        showToast('Auto-positioned numbers to prevent collisions.');
+      const optimized = optimizeDotLabels(
+        dots,
+        dotRadius,
+        fontSize,
+        pageSetup.widthPt,
+        pageSetup.heightPt,
+        pageSetup.marginPt
+      );
+      updateDotsWithHistory(optimized);
+      showToast('Auto-positioned number labels outward to prevent collisions.');
+    } catch {
+      try {
+        const res = await fetch(`${API_BASE}/api/reposition-numbers`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            dots,
+            canvasWidth: pageSetup.widthPt,
+            canvasHeight: pageSetup.heightPt,
+            pageMargin: pageSetup.marginPt,
+            dotRadius,
+            fontSize,
+          }),
+        });
+        const data = await res.json();
+        if (data.success) {
+          updateDotsWithHistory(data.dots);
+          showToast('Auto-positioned numbers to prevent collisions.');
+        }
+      } catch (err) {
+        console.error(err);
+        showToast('Error repositioning numbers.');
       }
-    } catch (err) {
-      console.error(err);
-      showToast('Error repositioning numbers.');
     }
+  };
+
+  // Insert Dot Before or After a Selected Dot
+  const handleInsertDotNear = (baseDot: Dot, before: boolean) => {
+    if (dots.length >= MAX_DOTS_HARD_CAP) {
+      showToast('Maximum 120 dots reached.');
+      return;
+    }
+    const sorted = [...dots].sort((a, b) => a.sequenceIndex - b.sequenceIndex);
+    const baseIdx = sorted.findIndex((d) => d.id === baseDot.id);
+    if (baseIdx === -1) return;
+
+    let targetX = baseDot.x;
+    let targetY = baseDot.y;
+    let targetSeq = baseDot.sequenceIndex;
+
+    if (before) {
+      const prev = sorted[(baseIdx - 1 + sorted.length) % sorted.length];
+      targetX = (baseDot.x + prev.x) / 2;
+      targetY = (baseDot.y + prev.y) / 2;
+      targetSeq = baseDot.sequenceIndex;
+    } else {
+      const next = sorted[(baseIdx + 1) % sorted.length];
+      targetX = (baseDot.x + next.x) / 2;
+      targetY = (baseDot.y + next.y) / 2;
+      targetSeq = baseDot.sequenceIndex + 1;
+    }
+
+    const newDot: Dot = {
+      id: `dot_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      sequenceIndex: targetSeq,
+      displayNumber: targetSeq,
+      x: Math.round(targetX * 10) / 10,
+      y: Math.round(targetY * 10) / 10,
+      numberX: Math.round((targetX + dotRadius + 8) * 10) / 10,
+      numberY: Math.round((targetY - dotRadius - 4) * 10) / 10,
+      source: 'manual',
+      visible: true,
+    };
+
+    const adjusted = dots.map((d) => {
+      if (d.sequenceIndex >= targetSeq) {
+        return {
+          ...d,
+          sequenceIndex: d.sequenceIndex + 1,
+          displayNumber: d.displayNumber + 1,
+        };
+      }
+      return d;
+    });
+
+    const sortedNew = [...adjusted, newDot].sort((a, b) => a.sequenceIndex - b.sequenceIndex);
+    const renumbered = sortedNew.map((d, idx) => ({
+      ...d,
+      sequenceIndex: idx + 1,
+      displayNumber: idx + 1,
+    }));
+
+    updateDotsWithHistory(renumbered);
+    setSelectedDotId(newDot.id);
+    showToast(`Inserted dot #${newDot.sequenceIndex}. Sequence auto-renumbered.`);
   };
 
   // Run Validation ("CHECK PUZZLE")
@@ -846,12 +977,115 @@ export const App: React.FC = () => {
     updateDotsWithHistory(nextDots);
   };
 
-  // Delete dot
+  // Educational Numbering Mode Change
+  const handleSetNumberingMode = useCallback((mode: NumberingMode) => {
+    setNumberingMode(mode);
+    setDots((prev) => {
+      const updated = applyNumberingModeToDots(prev, mode);
+      return updated;
+    });
+    showToast(`Numbering switched to ${mode.replace('_', ' ').toUpperCase()}`);
+  }, []);
+
+  // Make Selected Dot #1
+  const handleSetStartDot = useCallback(() => {
+    if (!selectedDotId) return;
+    setDots((prev) => {
+      const rotated = rotateStartDot(prev, selectedDotId);
+      const withLabels = applyNumberingModeToDots(rotated, numberingMode);
+      pushHistory(withLabels);
+      return withLabels;
+    });
+    showToast('Rotated sequence: selected dot is now Dot #1 (★)');
+  }, [selectedDotId, numberingMode, pushHistory]);
+
+  // Reverse Path Direction
+  const handleReversePath = useCallback(() => {
+    setDots((prev) => {
+      const reversed = reversePathDirection(prev);
+      const withLabels = applyNumberingModeToDots(reversed, numberingMode);
+      pushHistory(withLabels);
+      return withLabels;
+    });
+    showToast('Reversed path sequence (Clockwise ↔ Counter-Clockwise)!');
+  }, [numberingMode, pushHistory]);
+
+  // Split Path at Selected Dot (Lift Pencil)
+  const handleSplitPathAtSelected = useCallback(() => {
+    if (!selectedDotId) return;
+    setDots((prev) => {
+      const sorted = [...prev].sort((a, b) => a.sequenceIndex - b.sequenceIndex);
+      const selIdx = sorted.findIndex((d) => d.id === selectedDotId);
+      if (selIdx === -1) return prev;
+      const targetDot = sorted[selIdx];
+      const currentPathId = targetDot.pathId ?? 1;
+      const newPathId = Math.max(...sorted.map((d) => d.pathId ?? 1), 1) + 1;
+
+      const updated = sorted.map((d, i) => {
+        if (i >= selIdx && (d.pathId ?? 1) === currentPathId) {
+          return { ...d, pathId: newPathId };
+        }
+        return d;
+      });
+      pushHistory(updated);
+      return updated;
+    });
+    showToast('Created new island path from selected dot!');
+  }, [selectedDotId, pushHistory]);
+
+  // Smooth Path Curves
+  const handleSmoothPath = useCallback((intensity: number = 0.22) => {
+    setDots((prev) => {
+      const smoothed = smoothDotPath(prev, intensity);
+      pushHistory(smoothed);
+      return smoothed;
+    });
+    showToast('Curves smoothed with apex corner preservation!');
+  }, [pushHistory]);
+
+  // Untangle Crossings
+  const handleUntangleCrossings = useCallback(() => {
+    setDots((prev) => {
+      const untangled = untangleLineCrossings(prev);
+      const withLabels = applyNumberingModeToDots(untangled, numberingMode);
+      pushHistory(withLabels);
+      return withLabels;
+    });
+    showToast('Untangled all self-crossings with 2-Opt!');
+  }, [numberingMode, pushHistory]);
+
+  // Delete dot with clean sequential auto-renumbering
   const handleDeleteDot = (id: string) => {
-    const nextDots = dots.filter((d) => d.id !== id);
-    updateDotsWithHistory(nextDots);
+    const remaining = dots.filter((d) => d.id !== id);
+    const sortedRem = [...remaining].sort((a, b) => a.sequenceIndex - b.sequenceIndex);
+    const renumbered = sortedRem.map((d, idx) => ({
+      ...d,
+      sequenceIndex: idx + 1,
+      displayNumber: idx + 1,
+    }));
+    updateDotsWithHistory(renumbered);
     if (selectedDotId === id) setSelectedDotId(null);
-    showToast('Dot deleted. Click "Renumber All" if sequence update is desired.');
+    showToast('Dot deleted. Sequence auto-renumbered cleanly.');
+  };
+
+  // Apply batch generated pages from Bulk Book Creator
+  const handleApplyBatchPagesToProject = (batchPages: PageItem[], bookName: string, setup: PageSetup) => {
+    setProjectName(bookName);
+    setPageSetup(setup);
+    setPages(batchPages);
+    setActivePageIndex(0);
+    const first = batchPages[0];
+    if (first) {
+      setDots(first.dots || []);
+      setInitialAutoDots(first.initialAutoDots || first.dots || []);
+      setReferenceImage(first.referenceImage || null);
+      setEditedIllustration(first.editedIllustration || first.referenceImage || null);
+      setPageCaption(first.caption || first.title || '');
+      setSelectedDotId(null);
+      setHistory([first.dots || []]);
+      setHistoryIndex(0);
+    }
+    showToast(`Loaded ${batchPages.length} pages from Bulk Book Creator into project!`);
   };
 
   // --- Multi-Page Management Functions ---
@@ -1121,6 +1355,12 @@ export const App: React.FC = () => {
           includeIllustration,
           illustrationImageBase64: includeIllustration ? (editedIllustration || referenceImage) : null,
           caption: pageCaption,
+          startMarkerStyle,
+          stopMarkerStyle,
+          faintGuidelines,
+          faintGuidelineOpacity,
+          dotShape,
+          numberPlacement,
         }),
       });
       const blob = await res.blob();
@@ -1147,7 +1387,8 @@ export const App: React.FC = () => {
   const handleExportBookPdf = async (
     includeAnswerKey: boolean,
     includeIllustration: boolean = true,
-    frontMatter: FrontMatterOptions = { belongsTo: true, toc: true, copyright: true, instructions: true }
+    frontMatter: FrontMatterOptions = { belongsTo: true, toc: true, copyright: true, instructions: true },
+    answerKeyFormat: 'full_page' | 'compact_4up' = 'compact_4up'
   ) => {
     setIsExporting(true);
     try {
@@ -1183,11 +1424,18 @@ export const App: React.FC = () => {
           dotRadiusPt: dotRadius,
           fontSizePt: fontSize,
           includeAnswerKey,
+          answerKeyFormat,
           bookTitle: projectName || 'Dot-to-Dot Puzzle Book',
           includeBelongsTo: frontMatter.belongsTo,
           includeToc: frontMatter.toc,
           includeCopyright: frontMatter.copyright,
           includeInstructions: frontMatter.instructions,
+          startMarkerStyle,
+          stopMarkerStyle,
+          faintGuidelines,
+          faintGuidelineOpacity,
+          dotShape,
+          numberPlacement,
         }),
       });
 
@@ -1230,6 +1478,12 @@ export const App: React.FC = () => {
           includeIllustration,
           illustrationImageBase64: includeIllustration ? (editedIllustration || referenceImage) : null,
           caption: pageCaption,
+          startMarkerStyle,
+          stopMarkerStyle,
+          faintGuidelines,
+          faintGuidelineOpacity,
+          dotShape,
+          numberPlacement,
         }),
       });
       const blob = await res.blob();
@@ -1279,6 +1533,13 @@ export const App: React.FC = () => {
       referenceLocked,
       showAnswer,
       snapToGrid: snapEnabled,
+      startMarkerStyle,
+      stopMarkerStyle,
+      faintGuidelines,
+      faintGuidelineOpacity,
+      numberingMode,
+      dotShape,
+      numberPlacement,
       pages: pagesSnapshot,
       activePageIndex,
       mediaLibrary,
@@ -1311,6 +1572,13 @@ export const App: React.FC = () => {
     if (loaded.referenceLocked !== undefined) setReferenceLocked(loaded.referenceLocked);
     if (loaded.showAnswer !== undefined) setShowAnswer(loaded.showAnswer);
     if (loaded.snapToGrid !== undefined) setSnapEnabled(loaded.snapToGrid);
+    if (loaded.startMarkerStyle) setStartMarkerStyle(loaded.startMarkerStyle);
+    if (loaded.stopMarkerStyle) setStopMarkerStyle(loaded.stopMarkerStyle);
+    if (loaded.faintGuidelines) setFaintGuidelines(loaded.faintGuidelines);
+    if (loaded.faintGuidelineOpacity !== undefined) setFaintGuidelineOpacity(loaded.faintGuidelineOpacity);
+    if (loaded.numberingMode) setNumberingMode(loaded.numberingMode);
+    if (loaded.dotShape) setDotShape(loaded.dotShape);
+    if (loaded.numberPlacement) setNumberPlacement(loaded.numberPlacement);
 
     if (loaded.pages && loaded.pages.length > 0) {
       setPages(loaded.pages);
@@ -1419,6 +1687,7 @@ export const App: React.FC = () => {
         dotsCount={dots.length}
         totalPages={pages.length}
         activePageNumber={activePageIndex + 1}
+        onOpenBulkBookModal={() => setIsBulkBookModalOpen(true)}
       />
 
       {/* Main Workspace Layout (Supports Drag & Drop of Image Files) */}
@@ -1442,6 +1711,14 @@ export const App: React.FC = () => {
           eraserSize={eraserSize}
           setEraserSize={setEraserSize}
           onRestoreIllustration={handleRestoreIllustration}
+          magneticSnapEnabled={magneticSnapEnabled}
+          onToggleMagneticSnap={() => {
+            setMagneticSnapEnabled((prev) => {
+              const next = !prev;
+              showToast(`Magnetic Stroke Snap: ${next ? 'ON' : 'OFF'}`);
+              return next;
+            });
+          }}
         />
 
         {/* Center SVG Interactive Canvas */}
@@ -1471,6 +1748,13 @@ export const App: React.FC = () => {
           panOffset={panOffset}
           setPanOffset={setPanOffset}
           onNotifyMaxDots={() => showToast('Maximum 120 dots reached.')}
+          magneticSnapEnabled={magneticSnapEnabled}
+          startMarkerStyle={startMarkerStyle}
+          stopMarkerStyle={stopMarkerStyle}
+          faintGuidelines={faintGuidelines}
+          faintGuidelineOpacity={faintGuidelineOpacity}
+          dotShape={dotShape}
+          numberPlacement={numberPlacement}
         />
 
         {/* Right Inspector & Settings Sidebar */}
@@ -1508,6 +1792,34 @@ export const App: React.FC = () => {
           activePageNumber={activePageIndex + 1}
           pageCaption={pageCaption}
           onUpdatePageCaption={handleUpdatePageCaption}
+          thresholdSensitivity={thresholdSensitivity}
+          setThresholdSensitivity={setThresholdSensitivity}
+          snapToCenterline={snapToCenterline}
+          setSnapToCenterline={setSnapToCenterline}
+          onInsertDotNear={handleInsertDotNear}
+          onAutoPositionNumbers={handleAutoPositionNumbers}
+          magneticSnapEnabled={magneticSnapEnabled}
+          setMagneticSnapEnabled={setMagneticSnapEnabled}
+          startMarkerStyle={startMarkerStyle}
+          setStartMarkerStyle={setStartMarkerStyle}
+          stopMarkerStyle={stopMarkerStyle}
+          setStopMarkerStyle={setStopMarkerStyle}
+          faintGuidelines={faintGuidelines}
+          setFaintGuidelines={setFaintGuidelines}
+          faintGuidelineOpacity={faintGuidelineOpacity}
+          setFaintGuidelineOpacity={setFaintGuidelineOpacity}
+          numberingMode={numberingMode}
+          setNumberingMode={handleSetNumberingMode}
+          dotShape={dotShape}
+          setDotShape={setDotShape}
+          numberPlacement={numberPlacement}
+          setNumberPlacement={setNumberPlacement}
+          onSetStartDot={handleSetStartDot}
+          onReversePath={handleReversePath}
+          onSmoothPath={handleSmoothPath}
+          onUntangleCrossings={handleUntangleCrossings}
+          lineCrossingsCount={lineCrossingsCount}
+          onSplitPathAtSelected={handleSplitPathAtSelected}
         />
       </div>
 
@@ -1609,6 +1921,14 @@ export const App: React.FC = () => {
         isBatchPlotting={isBatchPlotting}
         batchPlotProgress={batchPlotProgress}
         isGenerating={isGenerating}
+      />
+
+      {/* Amazon KDP Bulk Book Creator Modal */}
+      <BulkBookModal
+        isOpen={isBulkBookModalOpen}
+        onClose={() => setIsBulkBookModalOpen(false)}
+        onApplyBatchPagesToProject={handleApplyBatchPagesToProject}
+        apiBase={API_BASE}
       />
     </div>
   );

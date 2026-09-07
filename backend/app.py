@@ -50,6 +50,8 @@ class DotModel(BaseModel):
     id: str
     sequenceIndex: int
     displayNumber: int
+    displayLabel: Optional[str] = None
+    pathId: Optional[int] = 1
     x: float
     y: float
     numberX: float
@@ -87,6 +89,12 @@ class ExportPdfRequest(BaseModel):
     includeIllustration: bool = True
     illustrationImageBase64: Optional[str] = None
     caption: Optional[str] = None
+    startMarkerStyle: str = "star"
+    stopMarkerStyle: str = "double_circle"
+    faintGuidelines: str = "none"
+    faintGuidelineOpacity: float = 0.18
+    dotShape: str = "circle"
+    numberPlacement: str = "outside"
 
 
 class PageExportModel(BaseModel):
@@ -104,11 +112,18 @@ class ExportBookPdfRequest(BaseModel):
     dotRadiusPt: float = 3.5
     fontSizePt: float = 9.0
     includeAnswerKey: bool = False
+    answerKeyFormat: str = "compact_4up"
     bookTitle: str = "Dot-to-Dot Puzzle Book"
     includeBelongsTo: bool = False
     includeToc: bool = False
     includeCopyright: bool = False
     includeInstructions: bool = False
+    startMarkerStyle: str = "star"
+    stopMarkerStyle: str = "double_circle"
+    faintGuidelines: str = "none"
+    faintGuidelineOpacity: float = 0.18
+    dotShape: str = "circle"
+    numberPlacement: str = "outside"
 
 
 class ExportPngRequest(BaseModel):
@@ -123,6 +138,12 @@ class ExportPngRequest(BaseModel):
     includeIllustration: bool = True
     illustrationImageBase64: Optional[str] = None
     caption: Optional[str] = None
+    startMarkerStyle: str = "star"
+    stopMarkerStyle: str = "double_circle"
+    faintGuidelines: str = "none"
+    faintGuidelineOpacity: float = 0.18
+    dotShape: str = "circle"
+    numberPlacement: str = "outside"
 
 
 # --- Endpoints ---
@@ -167,11 +188,14 @@ async def analyze_and_generate(
     canvas_height: float = Form(792.0),
     page_margin: float = Form(36.0),
     dot_radius: float = Form(3.5),
-    font_size: float = Form(9.0)
+    font_size: float = Form(9.0),
+    threshold_sensitivity: int = Form(50),
+    snap_to_centerline: bool = Form(True)
 ):
     """
     Processes an uploaded image or sample image, extracts contours & curvature,
     and places up to 120 numbered dots with 8-way number collision avoidance.
+    Supports adjustable line threshold sensitivity and stroke centerline snapping.
     """
     image_bytes = None
 
@@ -195,11 +219,13 @@ async def analyze_and_generate(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Failed to decode image: {str(e)}")
 
-    # 1. Run deterministic image analysis
+    # 1. Run deterministic image analysis with sensitivity & centerline snapping
     analysis = analyze_line_art(
         img_bgr,
         noise_reduction=noise_reduction,
-        adaptive_thresh=adaptive_thresh
+        adaptive_thresh=adaptive_thresh,
+        threshold_sensitivity=threshold_sensitivity,
+        snap_to_centerline=snap_to_centerline
     )
 
     # 2. Generate dots respecting budget (max 120)
@@ -283,7 +309,13 @@ def export_pdf(req: ExportPdfRequest):
         include_answer_key=req.includeAnswerKey,
         include_illustration=req.includeIllustration,
         illustration_image_base64=req.illustrationImageBase64,
-        caption=req.caption
+        caption=req.caption,
+        start_marker_style=req.startMarkerStyle,
+        stop_marker_style=req.stopMarkerStyle,
+        faint_guidelines=req.faintGuidelines,
+        faint_guideline_opacity=req.faintGuidelineOpacity,
+        dot_shape=req.dotShape,
+        number_placement=req.numberPlacement,
     )
 
     return Response(
@@ -311,7 +343,13 @@ def export_png(req: ExportPngRequest):
         include_answer_key=req.includeAnswerKey,
         include_illustration=req.includeIllustration,
         illustration_image_base64=req.illustrationImageBase64,
-        caption=req.caption
+        caption=req.caption,
+        start_marker_style=req.startMarkerStyle,
+        stop_marker_style=req.stopMarkerStyle,
+        faint_guidelines=req.faintGuidelines,
+        faint_guideline_opacity=req.faintGuidelineOpacity,
+        dot_shape=req.dotShape,
+        number_placement=req.numberPlacement,
     )
 
     return Response(
@@ -345,11 +383,18 @@ def export_book_pdf(req: ExportBookPdfRequest):
         dot_radius_pt=req.dotRadiusPt,
         font_size_pt=req.fontSizePt,
         include_answer_key=req.includeAnswerKey,
+        answer_key_format=req.answerKeyFormat,
         book_title=req.bookTitle,
         include_belongs_to=req.includeBelongsTo,
         include_toc=req.includeToc,
         include_copyright=req.includeCopyright,
         include_instructions=req.includeInstructions,
+        start_marker_style=req.startMarkerStyle,
+        stop_marker_style=req.stopMarkerStyle,
+        faint_guidelines=req.faintGuidelines,
+        faint_guideline_opacity=req.faintGuidelineOpacity,
+        dot_shape=req.dotShape,
+        number_placement=req.numberPlacement,
     )
 
     return Response(

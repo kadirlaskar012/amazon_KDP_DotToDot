@@ -1,6 +1,26 @@
 import React, { useRef, useState, useEffect } from 'react';
-import type { Dot, PageSetup, Tool } from '../types';
+import type {
+  Dot,
+  PageSetup,
+  Tool,
+  StartMarkerStyle,
+  StopMarkerStyle,
+  FaintGuidelineStyle,
+  DotShape,
+  NumberPlacement,
+} from '../types';
 import { screenToSvgCoords, snapCoord } from '../utils/geometry';
+import { findMagneticSnapPoint } from '../utils/magneticSnap';
+
+function getStarPoints(cx: number, cy: number, rOuter: number, rInner: number): string {
+  const pts: string[] = [];
+  for (let i = 0; i < 10; i++) {
+    const r = i % 2 === 0 ? rOuter : rInner;
+    const angle = (i * Math.PI) / 5 - Math.PI / 2;
+    pts.push(`${Math.round((cx + r * Math.cos(angle)) * 10) / 10},${Math.round((cy + r * Math.sin(angle)) * 10) / 10}`);
+  }
+  return pts.join(' ');
+}
 
 function distanceToSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): number {
   const dx = x2 - x1;
@@ -13,12 +33,24 @@ function distanceToSegment(px: number, py: number, x1: number, y1: number, x2: n
   return Math.hypot(px - projX, py - projY);
 }
 
+function projectPointOnSegment(px: number, py: number, x1: number, y1: number, x2: number, y2: number): { dist: number; x: number; y: number } {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  const lenSq = dx * dx + dy * dy;
+  if (lenSq === 0) return { dist: Math.hypot(px - x1, py - y1), x: x1, y: y1 };
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / lenSq));
+  const projX = x1 + t * dx;
+  const projY = y1 + t * dy;
+  return { dist: Math.hypot(px - projX, py - projY), x: projX, y: projY };
+}
+
 function renumberSequentialDots(dotsList: Dot[]): Dot[] {
   const sorted = [...dotsList].sort((a, b) => a.sequenceIndex - b.sequenceIndex);
   return sorted.map((d, idx) => ({
     ...d,
     sequenceIndex: idx + 1,
     displayNumber: idx + 1,
+    pathId: d.pathId ?? 1,
   }));
 }
 
@@ -49,6 +81,13 @@ interface CanvasProps {
   setPanOffset: React.Dispatch<React.SetStateAction<{ x: number; y: number }>>;
   onNotifyMaxDots: () => void;
   onInlineEditNumber?: (dotId: string) => void;
+  magneticSnapEnabled?: boolean;
+  startMarkerStyle?: StartMarkerStyle;
+  stopMarkerStyle?: StopMarkerStyle;
+  faintGuidelines?: FaintGuidelineStyle;
+  faintGuidelineOpacity?: number;
+  dotShape?: DotShape;
+  numberPlacement?: NumberPlacement;
 }
 
 export const Canvas: React.FC<CanvasProps> = ({
@@ -78,6 +117,13 @@ export const Canvas: React.FC<CanvasProps> = ({
   setPanOffset,
   onNotifyMaxDots,
   onInlineEditNumber,
+  magneticSnapEnabled = false,
+  startMarkerStyle = 'star',
+  stopMarkerStyle = 'double_circle',
+  faintGuidelines = 'none',
+  faintGuidelineOpacity = 0.18,
+  dotShape = 'circle',
+  numberPlacement = 'outside',
 }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const svgRef = useRef<SVGSVGElement>(null);
@@ -147,6 +193,55 @@ export const Canvas: React.FC<CanvasProps> = ({
     ctx.restore();
 
     lastErasePosRef.current = { x: imgX, y: imgY };
+  };
+
+  // Sorted dots for Answer Key sequence path and calculations
+  const sortedDots = [...dots].sort((a, b) => a.sequenceIndex - b.sequenceIndex);
+
+  // Magnetic Reticle and Line Segment Hover Insert states
+  const [magneticReticle, setMagneticReticle] = useState<{ x: number; y: number } | null>(null);
+  const [hoverSegment, setHoverSegment] = useState<{
+    index: number;
+    x: number;
+    y: number;
+    seqBefore: number;
+    seqAfter: number;
+  } | null>(null);
+
+  const handleInsertDotOnSegment = (seg: { x: number; y: number; seqBefore: number }) => {
+    if (dots.length >= 120) {
+      onNotifyMaxDots();
+      return;
+    }
+
+    const targetSeq = seg.seqBefore + 1;
+    const newDot: Dot = {
+      id: `dot_${Date.now()}_${Math.random().toString(36).substr(2, 4)}`,
+      sequenceIndex: targetSeq,
+      displayNumber: targetSeq,
+      x: seg.x,
+      y: seg.y,
+      numberX: seg.x + dotRadius + 8,
+      numberY: seg.y - dotRadius - 4,
+      source: 'manual',
+      visible: true,
+    };
+
+    const adjustedDots = dots.map((d) => {
+      if (d.sequenceIndex >= targetSeq) {
+        return {
+          ...d,
+          sequenceIndex: d.sequenceIndex + 1,
+          displayNumber: d.displayNumber + 1,
+        };
+      }
+      return d;
+    });
+
+    const updated = renumberSequentialDots([...adjustedDots, newDot]);
+    onUpdateDots(updated);
+    onSelectDot(newDot.id);
+    setHoverSegment(null);
   };
 
   // Dragging interaction state
@@ -384,7 +479,37 @@ export const Canvas: React.FC<CanvasProps> = ({
       return;
     }
 
-    if (!dragTarget) return;
+    if (!dragTarget) {
+      // Line segment hover detection for quick dot insertion
+      if (activeTool !== 'eraseLine' && sortedDots.length >= 2 && dots.length < 120) {
+        let nearestSeg: { index: number; x: number; y: number; seqBefore: number; seqAfter: number } | null = null;
+        let minSegDist = Infinity;
+
+        for (let i = 0; i < sortedDots.length - 1; i++) {
+          const p1 = sortedDots[i];
+          const p2 = sortedDots[i + 1];
+          const proj = projectPointOnSegment(svgCoords.x, svgCoords.y, p1.x, p1.y, p2.x, p2.y);
+          if (proj.dist < 18 && proj.dist < minSegDist) {
+            minSegDist = proj.dist;
+            nearestSeg = {
+              index: i,
+              x: Math.round(proj.x * 10) / 10,
+              y: Math.round(proj.y * 10) / 10,
+              seqBefore: p1.sequenceIndex,
+              seqAfter: p2.sequenceIndex,
+            };
+          }
+        }
+        setHoverSegment(nearestSeg);
+      } else if (hoverSegment) {
+        setHoverSegment(null);
+      }
+      return;
+    }
+
+    if (hoverSegment) {
+      setHoverSegment(null);
+    }
 
     if (dragTarget.type === 'pan') {
       const dx = e.clientX - dragTarget.startX;
@@ -401,8 +526,30 @@ export const Canvas: React.FC<CanvasProps> = ({
     const deltaSvgY = (e.clientY - dragTarget.startY) / scale;
 
     if (dragTarget.type === 'dot' && dragTarget.dotId) {
-      const newX = snapCoord(dragTarget.origX + deltaSvgX, 5, snapEnabled);
-      const newY = snapCoord(dragTarget.origY + deltaSvgY, 5, snapEnabled);
+      let newX = snapCoord(dragTarget.origX + deltaSvgX, 5, snapEnabled);
+      let newY = snapCoord(dragTarget.origY + deltaSvgY, 5, snapEnabled);
+
+      if (magneticSnapEnabled && illustrationCanvasRef.current) {
+        const snapRes = findMagneticSnapPoint(
+          newX,
+          newY,
+          illustrationCanvasRef.current,
+          offsetX,
+          offsetY,
+          imgScale,
+          18
+        );
+        if (snapRes.snapped) {
+          newX = snapRes.x;
+          newY = snapRes.y;
+          setMagneticReticle({ x: newX, y: newY });
+        } else {
+          setMagneticReticle(null);
+        }
+      } else {
+        setMagneticReticle(null);
+      }
+
       const diffX = newX - dragTarget.origX;
       const diffY = newY - dragTarget.origY;
 
@@ -441,6 +588,7 @@ export const Canvas: React.FC<CanvasProps> = ({
 
   const handlePointerUp = () => {
     setDragTarget(null);
+    setMagneticReticle(null);
     if (isErasingRef.current) {
       isErasingRef.current = false;
       lastErasePosRef.current = null;
@@ -500,9 +648,34 @@ export const Canvas: React.FC<CanvasProps> = ({
     });
   };
 
-  // Sorted dots for Answer Key sequence path
-  const sortedDots = [...dots].sort((a, b) => a.sequenceIndex - b.sequenceIndex);
-  const pathPoints = sortedDots.map((d) => `${d.x},${d.y}`).join(' ');
+  // Multi-path groups for islands and answer paths
+  const pathGroups = React.useMemo(() => {
+    const map = new Map<number, Dot[]>();
+    for (const d of sortedDots) {
+      const pid = d.pathId ?? 1;
+      if (!map.has(pid)) map.set(pid, []);
+      map.get(pid)!.push(d);
+    }
+    return Array.from(map.entries()).map(([pid, pDots]) => ({
+      pid,
+      dots: pDots,
+      pointsStr: pDots.map((d) => `${d.x},${d.y}`).join(' '),
+    }));
+  }, [sortedDots]);
+
+  const pathBounds = React.useMemo(() => {
+    const startIds = new Set<string>();
+    const stopIds = new Set<string>();
+    for (const g of pathGroups) {
+      if (g.dots.length > 0) {
+        startIds.add(g.dots[0].id);
+        if (g.dots.length > 1) {
+          stopIds.add(g.dots[g.dots.length - 1].id);
+        }
+      }
+    }
+    return { startIds, stopIds };
+  }, [pathGroups]);
 
   // Compute cursor style
   let cursorClass = 'cursor-default';
@@ -613,17 +786,42 @@ export const Canvas: React.FC<CanvasProps> = ({
             </foreignObject>
           )}
 
-          {/* 4. Answer Preview Connecting Lines */}
-          {showAnswer && sortedDots.length > 1 && (
-            <polyline
-              points={pathPoints}
-              fill="none"
-              stroke="#475569"
-              strokeWidth={1.2}
-              strokeDasharray="2 2"
-              pointerEvents="none"
-            />
-          )}
+          {/* 4. Answer Preview Connecting Lines (per path island) */}
+          {showAnswer && pathGroups.map((g) => (
+            g.dots.length > 1 ? (
+              <polyline
+                key={`ans-path-${g.pid}`}
+                points={g.pointsStr}
+                fill="none"
+                stroke="#475569"
+                strokeWidth={1.2}
+                strokeDasharray="2 2"
+                pointerEvents="none"
+              />
+            ) : null
+          ))}
+
+          {/* 4b. Faint Trace Guidelines (Toddler / Easy Tracing Mode) */}
+          {faintGuidelines !== 'none' && pathGroups.map((g) => (
+            g.dots.length > 1 ? (
+              <polyline
+                key={`faint-path-${g.pid}`}
+                points={g.pointsStr}
+                fill="none"
+                stroke="#94a3b8"
+                strokeWidth={1.2}
+                strokeOpacity={faintGuidelineOpacity}
+                strokeDasharray={
+                  faintGuidelines === 'dotted'
+                    ? '2 3'
+                    : faintGuidelines === 'dashed'
+                    ? '6 4'
+                    : undefined
+                }
+                pointerEvents="none"
+              />
+            ) : null
+          ))}
 
           {/* 5. Selected Dot Connector Line to its Number */}
           {selectedDot && (
@@ -639,10 +837,94 @@ export const Canvas: React.FC<CanvasProps> = ({
             />
           )}
 
+          {/* Interactive Line Segment Hover Insert Handle */}
+          {hoverSegment && activeTool !== 'eraseLine' && dots.length < 120 && (
+            <g
+              className="segment-insert-handle"
+              style={{ cursor: 'pointer' }}
+              onClick={(e) => {
+                e.stopPropagation();
+                handleInsertDotOnSegment(hoverSegment);
+              }}
+            >
+              {/* Outer pulsing ring */}
+              <circle
+                cx={hoverSegment.x}
+                cy={hoverSegment.y}
+                r={dotRadius + 5}
+                fill="#2563eb"
+                fillOpacity={0.25}
+                stroke="#3b82f6"
+                strokeWidth={1.5}
+              />
+              {/* Center button */}
+              <circle
+                cx={hoverSegment.x}
+                cy={hoverSegment.y}
+                r={dotRadius + 1}
+                fill="#2563eb"
+              />
+              {/* Plus icon inside */}
+              <text
+                x={hoverSegment.x}
+                y={hoverSegment.y}
+                fill="#ffffff"
+                fontSize={Math.max(9, dotRadius * 1.5)}
+                fontWeight="900"
+                textAnchor="middle"
+                dominantBaseline="central"
+                pointerEvents="none"
+              >
+                +
+              </text>
+            </g>
+          )}
+
+          {/* Magnetic Stroke Snap Reticle Target */}
+          {magneticReticle && (
+            <g className="magnetic-reticle" pointerEvents="none">
+              <circle
+                cx={magneticReticle.x}
+                cy={magneticReticle.y}
+                r={dotRadius + 7}
+                fill="none"
+                stroke="#06b6d4"
+                strokeWidth={2}
+                strokeDasharray="3 2"
+              />
+              <circle
+                cx={magneticReticle.x}
+                cy={magneticReticle.y}
+                r={2.5}
+                fill="#06b6d4"
+              />
+              <line
+                x1={magneticReticle.x - dotRadius - 10}
+                y1={magneticReticle.y}
+                x2={magneticReticle.x + dotRadius + 10}
+                y2={magneticReticle.y}
+                stroke="#06b6d4"
+                strokeWidth={1.2}
+                opacity={0.8}
+              />
+              <line
+                x1={magneticReticle.x}
+                y1={magneticReticle.y - dotRadius - 10}
+                x2={magneticReticle.x}
+                y2={magneticReticle.y + dotRadius + 10}
+                stroke="#06b6d4"
+                strokeWidth={1.2}
+                opacity={0.8}
+              />
+            </g>
+          )}
+
           {/* 6. Dots Layer */}
           {dots.map((dot) => {
             if (!dot.visible) return null;
             const isSelected = dot.id === selectedDotId;
+            const isStart = pathBounds.startIds.has(dot.id);
+            const isStop = pathBounds.stopIds.has(dot.id);
 
             return (
               <g key={`dot-g-${dot.id}`} className="dot-group">
@@ -651,7 +933,7 @@ export const Canvas: React.FC<CanvasProps> = ({
                   <circle
                     cx={dot.x}
                     cy={dot.y}
-                    r={dotRadius + 4.5}
+                    r={dotRadius + 5}
                     fill="none"
                     stroke="#3b82f6"
                     strokeWidth={2}
@@ -659,16 +941,81 @@ export const Canvas: React.FC<CanvasProps> = ({
                   />
                 )}
 
-                {/* Primary Solid Black Dot */}
-                <circle
-                  cx={dot.x}
-                  cy={dot.y}
-                  r={dotRadius}
-                  fill="#000000"
-                  className={`puzzle-dot ${isSelected ? 'selected' : ''}`}
-                  style={{ pointerEvents: activeTool === 'eraseLine' ? 'none' : 'auto' }}
-                  onPointerDown={(e) => handleDotPointerDown(e, dot)}
-                />
+                {/* Stop Marker Ring if applicable */}
+                {isStop && stopMarkerStyle === 'double_circle' && (
+                  <circle
+                    cx={dot.x}
+                    cy={dot.y}
+                    r={dotRadius + 4}
+                    fill="none"
+                    stroke="#ef4444"
+                    strokeWidth={1.5}
+                    strokeDasharray="3 2"
+                    pointerEvents="none"
+                  />
+                )}
+
+                {/* Primary Dot Rendering */}
+                {isStart && startMarkerStyle === 'star' ? (
+                  <polygon
+                    points={getStarPoints(dot.x, dot.y, dotRadius * 1.6, dotRadius * 0.72)}
+                    fill="#f59e0b"
+                    stroke="#b45309"
+                    strokeWidth={1.5}
+                    className={`puzzle-dot start-star ${isSelected ? 'selected' : ''}`}
+                    style={{ pointerEvents: activeTool === 'eraseLine' ? 'none' : 'auto', cursor: 'pointer' }}
+                    onPointerDown={(e) => handleDotPointerDown(e, dot)}
+                  />
+                ) : dotShape === 'ring' ? (
+                  <circle
+                    cx={dot.x}
+                    cy={dot.y}
+                    r={dotRadius}
+                    fill="#ffffff"
+                    stroke="#000000"
+                    strokeWidth={1.8}
+                    className={`puzzle-dot ${isSelected ? 'selected' : ''}`}
+                    style={{ pointerEvents: activeTool === 'eraseLine' ? 'none' : 'auto' }}
+                    onPointerDown={(e) => handleDotPointerDown(e, dot)}
+                  />
+                ) : dotShape === 'star' ? (
+                  <polygon
+                    points={getStarPoints(dot.x, dot.y, dotRadius * 1.35, dotRadius * 0.65)}
+                    fill="#000000"
+                    className={`puzzle-dot ${isSelected ? 'selected' : ''}`}
+                    style={{ pointerEvents: activeTool === 'eraseLine' ? 'none' : 'auto' }}
+                    onPointerDown={(e) => handleDotPointerDown(e, dot)}
+                  />
+                ) : dotShape === 'diamond' ? (
+                  <polygon
+                    points={`${dot.x},${dot.y - dotRadius * 1.3} ${dot.x + dotRadius * 1.3},${dot.y} ${dot.x},${dot.y + dotRadius * 1.3} ${dot.x - dotRadius * 1.3},${dot.y}`}
+                    fill="#000000"
+                    className={`puzzle-dot ${isSelected ? 'selected' : ''}`}
+                    style={{ pointerEvents: activeTool === 'eraseLine' ? 'none' : 'auto' }}
+                    onPointerDown={(e) => handleDotPointerDown(e, dot)}
+                  />
+                ) : dotShape === 'square' ? (
+                  <rect
+                    x={dot.x - dotRadius}
+                    y={dot.y - dotRadius}
+                    width={dotRadius * 2}
+                    height={dotRadius * 2}
+                    fill="#000000"
+                    className={`puzzle-dot ${isSelected ? 'selected' : ''}`}
+                    style={{ pointerEvents: activeTool === 'eraseLine' ? 'none' : 'auto' }}
+                    onPointerDown={(e) => handleDotPointerDown(e, dot)}
+                  />
+                ) : (
+                  <circle
+                    cx={dot.x}
+                    cy={dot.y}
+                    r={dotRadius}
+                    fill="#000000"
+                    className={`puzzle-dot ${isSelected ? 'selected' : ''}`}
+                    style={{ pointerEvents: activeTool === 'eraseLine' ? 'none' : 'auto' }}
+                    onPointerDown={(e) => handleDotPointerDown(e, dot)}
+                  />
+                )}
               </g>
             );
           })}
@@ -677,24 +1024,46 @@ export const Canvas: React.FC<CanvasProps> = ({
           {dots.map((dot) => {
             if (!dot.visible) return null;
             const isSelected = dot.id === selectedDotId;
+            const labelStr = dot.displayLabel || String(dot.displayNumber);
+            const isInside = numberPlacement === 'inside';
+            const posX = isInside ? dot.x : dot.numberX;
+            const posY = isInside ? dot.y : dot.numberY;
+            const textFill = isInside
+              ? (dotShape === 'ring' ? '#000000' : '#ffffff')
+              : (isSelected ? '#2563eb' : '#000000');
+            const numFontSize = isInside ? Math.max(7, dotRadius * 1.15) : fontSize;
 
             return (
-              <text
-                key={`num-${dot.id}`}
-                x={dot.numberX}
-                y={dot.numberY}
-                fontSize={fontSize}
-                fontFamily="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
-                fontWeight="700"
-                fill={isSelected ? '#2563eb' : '#000000'}
-                className={`puzzle-number ${isSelected ? 'selected' : ''}`}
-                style={{ pointerEvents: activeTool === 'eraseLine' ? 'none' : 'auto' }}
-                onPointerDown={(e) => handleNumberPointerDown(e, dot)}
-                dominantBaseline="central"
-                textAnchor="middle"
-              >
-                {dot.displayNumber}
-              </text>
+              <g key={`num-g-${dot.id}`}>
+                {/* Circular Badge Background when enabled */}
+                {numberPlacement === 'badge' && (
+                  <circle
+                    cx={posX}
+                    cy={posY}
+                    r={Math.max(fontSize * 0.72, (labelStr.length * fontSize * 0.36) + 2)}
+                    fill="#ffffff"
+                    fillOpacity={0.92}
+                    stroke="#cbd5e1"
+                    strokeWidth={0.75}
+                    pointerEvents="none"
+                  />
+                )}
+                <text
+                  x={posX}
+                  y={posY}
+                  fontSize={numFontSize}
+                  fontFamily="system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif"
+                  fontWeight="700"
+                  fill={textFill}
+                  className={`puzzle-number ${isSelected ? 'selected' : ''}`}
+                  style={{ pointerEvents: activeTool === 'eraseLine' ? 'none' : 'auto' }}
+                  onPointerDown={(e) => (isInside ? handleDotPointerDown(e, dot) : handleNumberPointerDown(e, dot))}
+                  dominantBaseline="central"
+                  textAnchor="middle"
+                >
+                  {labelStr}
+                </text>
+              </g>
             );
           })}
 
