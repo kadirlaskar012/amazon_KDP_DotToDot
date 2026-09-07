@@ -87,8 +87,8 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
 }) => {
   return (
     <header className="top-toolbar">
-      {/* Brand & Project Name */}
-      <div className="toolbar-section project-meta">
+      {/* 1. LEFT ZONE: Brand & Project Name (Pinned, Never overflows) */}
+      <div className="top-toolbar-left">
         <div className="app-logo">
           <span className="logo-dot"></span>
           <span className="logo-text">Dot2Dot<span className="pro-badge">PRO</span></span>
@@ -103,229 +103,213 @@ export const TopToolbar: React.FC<TopToolbarProps> = ({
         />
         {totalPages > 1 && (
           <span
-            style={{
-              fontSize: '11px',
-              fontWeight: 700,
-              backgroundColor: 'rgba(59, 130, 246, 0.15)',
-              color: '#60a5fa',
-              padding: '2px 7px',
-              borderRadius: '10px',
-              whiteSpace: 'nowrap',
-            }}
+            className="page-badge"
             title={`Active Page: ${activePageNumber} of ${totalPages}`}
           >
-            Page {activePageNumber}/{totalPages}
+            {activePageNumber}/{totalPages}
           </span>
         )}
       </div>
 
-      {/* Project & Media Actions */}
-      <div className="toolbar-section">
-        <button
-          className="btn btn-primary"
-          onClick={onOpenNewProject}
-          title="Create New Multi-Page Book Project"
-          style={{ padding: '6px 12px' }}
-        >
-          <BookPlus size={16} />
-          <span>New Project</span>
-        </button>
+      {/* 2. CENTER ZONE: Flexible, Scrollable Tools Bar */}
+      <div className="top-toolbar-center">
+        {/* Project & Media Operations */}
+        <div className="toolbar-section">
+          <button
+            className="btn btn-primary-soft btn-sm"
+            onClick={onOpenNewProject}
+            title="Create New Multi-Page Book Project"
+          >
+            <BookPlus size={15} />
+            <span className="btn-label btn-label-secondary">New Project</span>
+          </button>
 
-        <button
-          className="btn btn-secondary"
-          onClick={onOpenMediaLibrary}
-          title="Open Media Library to batch upload and manage illustrations"
-          style={{ position: 'relative' }}
-        >
-          <Images size={16} />
-          <span>Media Library</span>
-          {mediaCount > 0 && (
-            <span
-              style={{
-                marginLeft: 4,
-                backgroundColor: '#3b82f6',
-                color: '#ffffff',
-                fontSize: 10,
-                fontWeight: 700,
-                padding: '1px 5px',
-                borderRadius: 8,
+          <button
+            className="btn btn-secondary btn-sm"
+            onClick={onOpenMediaLibrary}
+            title="Open Media Library to batch upload and manage illustrations"
+            style={{ position: 'relative' }}
+          >
+            <Images size={15} />
+            <span className="btn-label btn-label-secondary">Media</span>
+            {mediaCount > 0 && (
+              <span className="toolbar-badge">
+                {mediaCount}
+              </span>
+            )}
+          </button>
+
+          <label className="btn btn-upload btn-sm" title="Upload custom black & white line-art illustration (PNG, JPG)">
+            <Upload size={15} />
+            <span className="btn-label btn-label-secondary">Upload</span>
+            <input
+              type="file"
+              accept="image/png, image/jpeg, image/jpg"
+              onChange={(e) => {
+                onUploadImage(e);
+                e.target.value = '';
               }}
-            >
-              {mediaCount}
-            </span>
-          )}
-        </button>
+              style={{ display: 'none' }}
+            />
+          </label>
 
-        <label className="btn btn-upload" title="Upload custom black & white line-art illustration (PNG, JPG)">
-          <Upload size={16} />
-          <span>Upload Image</span>
-          <input
-            type="file"
-            accept="image/png, image/jpeg, image/jpg"
-            onChange={(e) => {
-              onUploadImage(e);
-              e.target.value = '';
-            }}
-            style={{ display: 'none' }}
-          />
-        </label>
+          <button className="btn btn-ghost btn-sm btn-icon-adaptive" onClick={onOpenSamples} title="Open Sample Illustration Gallery">
+            <Library size={15} />
+            <span className="btn-label btn-label-adaptive">Samples</span>
+          </button>
 
-        <button className="btn btn-ghost" onClick={onOpenSamples} title="Open Sample Illustration Gallery">
-          <Library size={16} />
-          <span>Samples</span>
-        </button>
+          <button className="btn btn-ghost btn-sm btn-icon-adaptive" onClick={onLoadProject} title="Open .dotproj Project">
+            <FolderOpen size={15} />
+            <span className="btn-label btn-label-adaptive">Open</span>
+          </button>
+          <button className="btn btn-ghost btn-sm btn-icon-adaptive" onClick={onSaveProject} title="Save .dotproj Project File">
+            <Save size={15} />
+            <span className="btn-label btn-label-adaptive">Save</span>
+          </button>
+        </div>
 
-        <button className="btn btn-ghost" onClick={onLoadProject} title="Open .dotproj Project">
-          <FolderOpen size={16} />
-          <span>Open</span>
-        </button>
-        <button className="btn btn-ghost" onClick={onSaveProject} title="Save .dotproj Project File">
-          <Save size={16} />
-          <span>Save</span>
-        </button>
+        <div className="toolbar-divider" />
+
+        {/* History Actions */}
+        <div className="toolbar-section">
+          <button
+            className="btn btn-icon btn-sm"
+            onClick={onUndo}
+            disabled={!canUndo}
+            title="Undo (Ctrl+Z)"
+          >
+            <Undo2 size={15} />
+          </button>
+          <button
+            className="btn btn-icon btn-sm"
+            onClick={onRedo}
+            disabled={!canRedo}
+            title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
+          >
+            <Redo2 size={15} />
+          </button>
+        </div>
+
+        <div className="toolbar-divider" />
+
+        {/* Zoom Controls */}
+        <div className="toolbar-section zoom-controls">
+          <button
+            className="btn btn-icon btn-sm"
+            onClick={() => onZoomChange(Math.max(25, zoom - 25))}
+            title="Zoom Out (-)"
+          >
+            <ZoomOut size={15} />
+          </button>
+          <select
+            className="zoom-select"
+            value={zoom}
+            onChange={(e) => onZoomChange(Number(e.target.value))}
+          >
+            <option value={25}>25%</option>
+            <option value={50}>50%</option>
+            <option value={75}>75%</option>
+            <option value={100}>100%</option>
+            <option value={125}>125%</option>
+            <option value={150}>150%</option>
+            <option value={200}>200%</option>
+            <option value={300}>300%</option>
+            <option value={400}>400%</option>
+            <option value={800}>800%</option>
+          </select>
+          <button
+            className="btn btn-icon btn-sm"
+            onClick={() => onZoomChange(Math.min(800, zoom + 25))}
+            title="Zoom In (+)"
+          >
+            <ZoomIn size={15} />
+          </button>
+          <button
+            className="btn btn-icon btn-sm"
+            onClick={onFitToScreen}
+            title="Fit Page to Screen"
+          >
+            <Maximize2 size={15} />
+          </button>
+        </div>
+
+        <div className="toolbar-divider" />
+
+        {/* Core Dot & Sequence Operations */}
+        <div className="toolbar-section main-actions">
+          <button className="btn btn-secondary btn-sm" onClick={onAutoDots} title="Auto Generate Dots from Illustration">
+            <Sparkles size={15} />
+            <span className="btn-label">Auto Dots</span>
+          </button>
+          <button
+            className="btn btn-ghost btn-sm btn-icon-adaptive"
+            onClick={onResetAuto}
+            title="Reset to Initial Auto Generated Dots"
+          >
+            <RotateCcw size={15} />
+            <span className="btn-label btn-label-adaptive">Reset</span>
+          </button>
+          <button
+            className="btn btn-ghost btn-sm btn-icon-adaptive"
+            onClick={onRenumberAll}
+            title="Renumber All Dots Sequentially (1 to N)"
+          >
+            <ListOrdered size={15} />
+            <span className="btn-label btn-label-adaptive">Renumber</span>
+          </button>
+          <button
+            className="btn btn-ghost btn-sm btn-icon-adaptive"
+            onClick={onAutoPositionNumbers}
+            title="Auto Position Numbers to Avoid Collisions"
+          >
+            <Compass size={15} />
+            <span className="btn-label btn-label-adaptive">Numbers</span>
+          </button>
+        </div>
+
+        <div className="toolbar-divider" />
+
+        {/* Layer Toggles & Verification */}
+        <div className="toolbar-section">
+          <button
+            className={`btn btn-sm ${referenceVisible ? 'btn-active' : 'btn-ghost'}`}
+            onClick={onToggleReference}
+            title={referenceVisible ? 'Hide Reference Image' : 'Show Reference Image'}
+          >
+            <ImageIcon size={15} />
+            <span className="btn-label">Ref {referenceVisible ? 'ON' : 'OFF'}</span>
+          </button>
+
+          <button
+            className={`btn btn-sm btn-icon-adaptive ${showAnswer ? 'btn-active' : 'btn-ghost'}`}
+            onClick={onToggleShowAnswer}
+            title={showAnswer ? 'Hide Answer Connecting Lines' : 'Show Answer Connecting Lines'}
+          >
+            {showAnswer ? <EyeOff size={15} /> : <Eye size={15} />}
+            <span className="btn-label btn-label-adaptive">{showAnswer ? 'Hide Ans' : 'Answer'}</span>
+          </button>
+
+          <button
+            className="btn btn-ghost btn-sm btn-icon-adaptive"
+            onClick={onOpenQualityCheck}
+            title="Run Puzzle Quality Check"
+          >
+            <CheckCircle2 size={15} />
+            <span className="btn-label btn-label-adaptive">Check</span>
+          </button>
+        </div>
       </div>
 
-      <div className="toolbar-divider" />
-
-      {/* History Actions */}
-      <div className="toolbar-section">
+      {/* 3. RIGHT ZONE: Highlighted, Permanent Export Button (ALWAYS VISIBLE ON SCREEN) */}
+      <div className="top-toolbar-right">
         <button
-          className="btn btn-icon"
-          onClick={onUndo}
-          disabled={!canUndo}
-          title="Undo (Ctrl+Z)"
-        >
-          <Undo2 size={16} />
-        </button>
-        <button
-          className="btn btn-icon"
-          onClick={onRedo}
-          disabled={!canRedo}
-          title="Redo (Ctrl+Y / Ctrl+Shift+Z)"
-        >
-          <Redo2 size={16} />
-        </button>
-      </div>
-
-      <div className="toolbar-divider" />
-
-      {/* Zoom Controls */}
-      <div className="toolbar-section zoom-controls">
-        <button
-          className="btn btn-icon"
-          onClick={() => onZoomChange(Math.max(25, zoom - 25))}
-          title="Zoom Out (-)"
-        >
-          <ZoomOut size={16} />
-        </button>
-        <select
-          className="zoom-select"
-          value={zoom}
-          onChange={(e) => onZoomChange(Number(e.target.value))}
-        >
-          <option value={25}>25%</option>
-          <option value={50}>50%</option>
-          <option value={75}>75%</option>
-          <option value={100}>100%</option>
-          <option value={125}>125%</option>
-          <option value={150}>150%</option>
-          <option value={200}>200%</option>
-          <option value={300}>300%</option>
-          <option value={400}>400%</option>
-          <option value={800}>800%</option>
-        </select>
-        <button
-          className="btn btn-icon"
-          onClick={() => onZoomChange(Math.min(800, zoom + 25))}
-          title="Zoom In (+)"
-        >
-          <ZoomIn size={16} />
-        </button>
-        <button
-          className="btn btn-icon"
-          onClick={onFitToScreen}
-          title="Fit Page to Screen"
-        >
-          <Maximize2 size={16} />
-        </button>
-      </div>
-
-      <div className="toolbar-divider" />
-
-      {/* Core Dot & Sequence Operations */}
-      <div className="toolbar-section main-actions">
-        <button className="btn btn-secondary" onClick={onAutoDots} title="Auto Generate Dots from Illustration">
-          <Sparkles size={16} />
-          <span>Auto Dots</span>
-        </button>
-        <button
-          className="btn btn-ghost"
-          onClick={onResetAuto}
-          title="Reset to Initial Auto Generated Dots"
-        >
-          <RotateCcw size={16} />
-          <span>Reset Auto</span>
-        </button>
-        <button
-          className="btn btn-ghost"
-          onClick={onRenumberAll}
-          title="Renumber All Dots Sequentially (1 to N)"
-        >
-          <ListOrdered size={16} />
-          <span>Renumber All</span>
-        </button>
-        <button
-          className="btn btn-ghost"
-          onClick={onAutoPositionNumbers}
-          title="Auto Position Numbers to Avoid Collisions"
-        >
-          <Compass size={16} />
-          <span>Auto Numbers</span>
-        </button>
-      </div>
-
-      <div className="toolbar-divider" />
-
-      {/* Layer Toggles & Verification */}
-      <div className="toolbar-section">
-        <button
-          className={`btn ${referenceVisible ? 'btn-active' : 'btn-ghost'}`}
-          onClick={onToggleReference}
-          title={referenceVisible ? 'Hide Reference Image' : 'Show Reference Image'}
-        >
-          <ImageIcon size={16} />
-          <span>Ref {referenceVisible ? 'ON' : 'OFF'}</span>
-        </button>
-
-        <button
-          className={`btn ${showAnswer ? 'btn-active' : 'btn-ghost'}`}
-          onClick={onToggleShowAnswer}
-          title={showAnswer ? 'Hide Answer Connecting Lines' : 'Show Answer Connecting Lines'}
-        >
-          {showAnswer ? <EyeOff size={16} /> : <Eye size={16} />}
-          <span>{showAnswer ? 'Hide Answer' : 'Show Answer'}</span>
-        </button>
-
-        <button
-          className="btn btn-ghost"
-          onClick={onOpenQualityCheck}
-          title="Run Puzzle Quality Check"
-        >
-          <CheckCircle2 size={16} />
-          <span>Check</span>
-        </button>
-      </div>
-
-      {/* Primary Export Action */}
-      <div className="toolbar-section export-section">
-        <button
-          className="btn btn-primary"
+          className="btn-export-highlight"
           onClick={onOpenExportModal}
           disabled={dotsCount === 0 && totalPages <= 1}
-          title="Preview and Export Vector PDF / PNG"
+          title="Preview and Export Vector PDF / PNG for Amazon KDP"
         >
-          <FileDown size={16} />
-          <span>Export PDF</span>
+          <FileDown size={17} />
+          <span className="export-label">Export PDF</span>
         </button>
       </div>
     </header>

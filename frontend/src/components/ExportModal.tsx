@@ -97,10 +97,11 @@ export const ExportModal: React.FC<ExportModalProps> = ({
           <div className="preview-canvas-wrapper">
             <svg
               className="export-preview-svg"
-              width="100%"
               viewBox={`0 0 ${pageSetup.widthPt} ${pageSetup.heightPt}`}
               style={{
                 aspectRatio: `${pageSetup.widthPt} / ${pageSetup.heightPt}`,
+                maxHeight: '100%',
+                maxWidth: '100%',
                 background: '#ffffff',
                 boxShadow: '0 8px 30px rgba(0, 0, 0, 0.4)',
                 borderRadius: '4px',
